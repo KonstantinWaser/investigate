@@ -646,3 +646,56 @@ def test_images_display_inline_in_the_report_and_other_files_download(home, serv
     assert img_headers["Content-Security-Policy"] == "sandbox"
     _, pdf_headers, _ = client.get(f"/runs/{run_id}/attachments/notes.pdf")
     assert pdf_headers["Content-Disposition"] == "attachment"
+
+
+def _smuggled_submit(port: int) -> bytes:
+    """A complete submit request with no Origin, which the guard lets through on its own."""
+    body = b'{"text": "SMUGGLED run"}'
+    return (
+        b"POST /api/runs HTTP/1.1\r\n"
+        + f"Host: 127.0.0.1:{port}\r\n".encode()
+        + b"Content-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+
+
+def _raw_exchange(port: int, payload: bytes) -> bytes:
+    """Send raw bytes on one connection and read until the server closes it."""
+    import socket
+
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.sendall(payload)
+        chunks = []
+        try:
+            while data := sock.recv(65536):
+                chunks.append(data)
+        except TimeoutError:
+            pass
+    return b"".join(chunks)
+
+
+@pytest.mark.parametrize(
+    "outer",
+    [
+        # refused by the Origin check, body left unread
+        "POST /api/runs HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://evil.example\r\n"
+        "Content-Type: text/plain\r\nContent-Length: {length}\r\n\r\n",
+        # refused by the Host check
+        "POST /api/runs HTTP/1.1\r\nHost: evil.example\r\nContent-Length: {length}\r\n\r\n",
+        # a GET carrying a body, which GET never reads
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {length}\r\n\r\n",
+        # a chunked body, which the server does not parse
+        "POST /api/runs HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n{length:x}\r\n",
+    ],
+    ids=["foreign-origin", "foreign-host", "get-with-body", "chunked"],
+)
+def test_an_unread_body_is_never_run_as_a_second_request(home, server, outer):
+    inner = _smuggled_submit(server.port)
+    head = outer.format(port=server.port, length=len(inner)).encode()
+    reply = _raw_exchange(server.port, head + inner)
+    assert reply.count(b"HTTP/1.1 ") == 1, reply
+    assert b"202" not in reply.split(b"\r\n", 1)[0]
+    runs = home / "runs"
+    assert not runs.exists() or not any(runs.iterdir())

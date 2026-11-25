@@ -390,12 +390,24 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(HTTPStatus.SEE_OTHER, b"", "text/plain", {"Location": location})
 
     def _guard(self, *, state_changing: bool) -> bool:
+        # Any body this handler does not read would stay on the keep-alive connection and be
+        # parsed as the next request, with headers the sender chose (no Origin). So close the
+        # connection whenever a body may be left unread: refused requests, chunked bodies and
+        # bodies on GET.
+        if "Transfer-Encoding" in self.headers:
+            self.close_connection = True
+            self._text(HTTPStatus.NOT_IMPLEMENTED, "chunked request bodies are not supported")
+            return False
         ok = request_allowed(
             self.headers, state_changing=state_changing, allow_remote=self.app.allow_remote
         )
         if not ok:
+            self.close_connection = True
             self._text(HTTPStatus.FORBIDDEN, "forbidden: cross-origin or non-local request")
-        return ok
+            return False
+        if not state_changing and self.headers.get("Content-Length", "0").strip() != "0":
+            self.close_connection = True
+        return True
 
     def _body_cap(self) -> int:
         """The largest body worth reading: every allowed file at the size limit, plus a margin."""
