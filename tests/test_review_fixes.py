@@ -99,7 +99,8 @@ def test_context_path_with_tilde_is_expanded(home, monkeypatch):
 def test_prompt_and_permissions_use_the_same_resolved_path(home):
     from tests.fakes import FakeRunner
 
-    home.mkdir()
+    (home / "ctx").mkdir(parents=True)
+    (home / "ctx" / "me.md").write_text("me", encoding="utf-8")
     config_path(home).write_text('context_files = ["ctx/me.md"]', encoding="utf-8")
     runner = FakeRunner()
     execute_run("topic", Depth.QUICK, home=home, runner=runner, now=NOW)

@@ -97,9 +97,17 @@ def execute_run(
     history.upsert(home, entry("running", _item_title(item), session_id))
 
     settings = config.depths[depth]
-    context_files = tuple(Path(p) for p in config.context_files)
+    # A Context file that is missing is noted in the run log and skipped, never fatal.
+    contexts = tuple((c.name, Path(c.path)) for c in config.contexts if Path(c.path).is_file())
+    present = {name for name, _ in contexts}
+    context_notes = [
+        f"WARNING: Context {c.name!r} skipped, file not found: {c.path}" + chr(10)
+        for c in config.contexts
+        if c.name not in present
+    ]
+    context_files = tuple(path for _, path in contexts)
     request = RunRequest(
-        prompt=build_prompt(item, depth, config.language, context_files),
+        prompt=build_prompt(item, depth, config.language, contexts),
         workdir=folder,
         session_id=session_id,
         timeout_seconds=settings.timeout_minutes * 60,
@@ -113,7 +121,7 @@ def execute_run(
         error = traceback.format_exc()
         outcome = RunnerOutcome(False, False, "", session_id, error, error)
 
-    log = outcome.log or ""
+    log = "".join(context_notes) + (outcome.log or "")
     if outcome.error and outcome.error not in log:
         log += f"\nERROR: {outcome.error}\n"
     (folder / "agent.log").write_text(log, encoding="utf-8")
@@ -143,6 +151,7 @@ def execute_run(
             created=created,
             result=parsed,
             error=outcome.error if status == "failed" else None,
+            contexts=tuple(name for name, _ in contexts),
         )
     )
     report_path = folder / "report.html"

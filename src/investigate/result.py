@@ -32,6 +32,16 @@ SCHEMA_EXAMPLE = """\
 }
 ```"""
 
+# Added to the prompt only when Contexts are configured. Keep in step with `_relevance`.
+RELEVANCE_EXAMPLE = """\
+Also add a "relevance" list to the JSON block, with exactly one entry per Context name given \
+above, like this:
+
+  "relevance": [
+    {"context": "<Context name>", "relevant": true, "text": "How the findings bear on it."},
+    {"context": "<other Context name>", "relevant": false, "text": ""}
+  ]"""
+
 _JSON_BLOCK = re.compile(r"^```json[ \t]*\r?\n(.*?)\r?\n```[ \t]*$", re.MULTILINE | re.DOTALL)
 
 
@@ -51,13 +61,21 @@ class Finding:
 
 
 @dataclass(frozen=True)
+class ContextRelevance:
+    context: str  # the Context's name from config
+    relevant: bool
+    text: str
+
+
+@dataclass(frozen=True)
 class StructuredResult:
     title: str
     summary: str
     findings: tuple[Finding, ...]
+    relevance: tuple[ContextRelevance, ...] = ()
 
     def to_json(self) -> dict:
-        return {
+        data = {
             "schema_version": SCHEMA_VERSION,
             "title": self.title,
             "summary": self.summary,
@@ -73,6 +91,12 @@ class StructuredResult:
                 for f in self.findings
             ],
         }
+        if self.relevance:
+            data["relevance"] = [
+                {"context": r.context, "relevant": r.relevant, "text": r.text}
+                for r in self.relevance
+            ]
+        return data
 
 
 @dataclass(frozen=True)
@@ -126,9 +150,35 @@ def _validate(data: object, problems: list[str]) -> StructuredResult | None:
             finding = _finding(item, i, problems)
             if finding:
                 findings.append(finding)
+    relevance = _relevance(data.get("relevance", []), problems)
     if problems:
         return None
-    return StructuredResult(title or "", summary or "", tuple(findings))
+    return StructuredResult(title or "", summary or "", tuple(findings), relevance)
+
+
+def _relevance(raw: object, problems: list[str]) -> tuple[ContextRelevance, ...]:
+    if not isinstance(raw, list):
+        problems.append("'relevance' is not a list.")
+        return ()
+    entries: list[ContextRelevance] = []
+    for i, item in enumerate(raw):
+        where = f"relevance[{i}]"
+        if not isinstance(item, dict):
+            problems.append(f"{where} is not an object.")
+            continue
+        context = _text(item.get("context"))
+        if not context:
+            problems.append(f"{where}.context is missing or not a non-empty string.")
+        relevant = item.get("relevant")
+        if not isinstance(relevant, bool):
+            problems.append(f"{where}.relevant must be true or false.")
+        text = item.get("text", "")
+        if not isinstance(text, str):
+            problems.append(f"{where}.text is not a string.")
+            text = ""
+        if context and isinstance(relevant, bool):
+            entries.append(ContextRelevance(context, relevant, text.strip()))
+    return tuple(entries)
 
 
 def _finding(item: object, index: int, problems: list[str]) -> Finding | None:
