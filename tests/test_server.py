@@ -699,3 +699,13 @@ def test_an_unread_body_is_never_run_as_a_second_request(home, server, outer):
     assert b"202" not in reply.split(b"\r\n", 1)[0]
     runs = home / "runs"
     assert not runs.exists() or not any(runs.iterdir())
+
+
+def test_chunked_bodies_are_refused_and_the_connection_closed(home, server):
+    head = (
+        f"POST /api/runs HTTP/1.1\r\nHost: 127.0.0.1:{server.port}\r\n"
+        f"Origin: http://127.0.0.1:{server.port}\r\nTransfer-Encoding: chunked\r\n\r\n"
+    ).encode()
+    reply = _raw_exchange(server.port, head + b"0\r\n\r\n" + _smuggled_submit(server.port))
+    assert reply.startswith(b"HTTP/1.1 501 ")
+    assert reply.count(b"HTTP/1.1 ") == 1
