@@ -9,6 +9,8 @@ page).
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import email.policy
 import ipaddress
 import json
@@ -36,7 +38,6 @@ DEFAULT_PORT = 8765
 MAX_BODY = 200 * 1024 * 1024
 ATTACHMENTS_DIR = "attachments"
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-_LOCAL_NAMES = {"localhost", "127.0.0.1", "[::1]"}
 
 
 class SubmitError(ValueError):
@@ -135,7 +136,7 @@ def request_allowed(headers, *, state_changing: bool, allow_remote: bool) -> boo
     host = headers.get("Host", "")
     if not allow_remote:
         name = host if host.endswith("]") else host.rsplit(":", 1)[0]
-        if name.lower() not in _LOCAL_NAMES:
+        if not is_loopback(name.lower()):
             return False
     if not state_changing:
         return True
@@ -156,10 +157,11 @@ class _StagedRunner:
         self.name = inner.name
 
     def run(self, request: RunRequest) -> RunnerOutcome:
-        if self.staged is not None:
-            shutil.move(str(self.staged), str(request.workdir / ATTACHMENTS_DIR))
-            self.staged = None
         self.announce(request.workdir.name)
+        if self.staged is not None:
+            staged, self.staged = self.staged, None
+            # A failure here propagates into `execute_run`, which records a failed Run.
+            shutil.move(str(staged), str(request.workdir / ATTACHMENTS_DIR))
         return self.inner.run(request)
 
 
@@ -193,6 +195,7 @@ class HistoryServer:
         self._lock = threading.Lock()
         self._active: set[str] = set()
         self._workers: list[threading.Thread] = []
+        self._connections: set[socket.socket] = set()
 
     # lifecycle
 
@@ -219,6 +222,11 @@ class HistoryServer:
             return
         self._httpd.shutdown()
         self._httpd.server_close()
+        with self._lock:
+            open_connections, self._connections = list(self._connections), set()
+        for conn in open_connections:  # keep-alive clients must not outlive the server
+            with contextlib.suppress(OSError):
+                conn.shutdown(socket.SHUT_RDWR)
         if self._thread:
             self._thread.join(timeout=5)
         self._httpd = self._thread = None
@@ -241,9 +249,11 @@ class HistoryServer:
 
     def wait_for_runs(self, timeout: float = 30) -> bool:
         """Wait until every background Run has finished."""
-        for worker in list(self._workers):
+        with self._lock:
+            workers = list(self._workers)
+        for worker in workers:
             worker.join(timeout)
-        return not any(w.is_alive() for w in self._workers)
+        return not any(w.is_alive() for w in workers)
 
     # actions
 
@@ -286,6 +296,7 @@ class HistoryServer:
                 execute_run(item, chosen, home=self.home, runner=wrapper)
             except Exception as exc:  # reported to the submitter if it is still waiting
                 box.setdefault("error", f"{type(exc).__name__}: {exc}")
+                self._mark_failed(box.get("id"), box["error"])
             finally:
                 with self._lock:
                     self._active.discard(box.get("id", ""))
@@ -294,12 +305,29 @@ class HistoryServer:
                 announced.set()
 
         worker = threading.Thread(target=work, daemon=True)
-        self._workers = [w for w in self._workers if w.is_alive()] + [worker]
-        worker.start()
+        with self._lock:
+            # Started before it is listed: an unstarted thread reads as not alive and would be
+            # pruned by a concurrent submit.
+            worker.start()
+            self._workers = [w for w in self._workers if w.is_alive()] + [worker]
         announced.wait(timeout=60)
         if "id" not in box:
             raise RuntimeError(box.get("error", "the Run did not start"))
         return box["id"]
+
+    def _mark_failed(self, run_id: str | None, error: str) -> None:
+        """A Run that crashed after it was listed as running must not stay running forever."""
+        if not run_id:
+            return
+        try:
+            entry = next(e for e in history.load_entries(self.home) if e.id == run_id)
+            history.upsert(self.home, dataclasses.replace(entry, status="failed"))
+            folder = self.run_folder(run_id)
+            if folder is not None:
+                with open(folder / "agent.log", "a", encoding="utf-8") as log:
+                    log.write(f"\nERROR: {error}\n")
+        except (StopIteration, OSError):
+            pass
 
     def run_folder(self, run_id: str) -> Path | None:
         """The folder of a Run, or None for an id that is not a plain child of `runs/`."""
@@ -307,7 +335,8 @@ class HistoryServer:
             return None
         runs = (self.home / "runs").resolve()
         folder = (runs / run_id).resolve()
-        return folder if folder.parent == runs else None
+        # Windows maps "id." and other spellings onto the same folder; only the exact name counts.
+        return folder if folder.parent == runs and folder.name == run_id else None
 
     def delete(self, run_id: str) -> str:
         """'deleted', 'busy' (still running here) or 'missing'."""
@@ -316,6 +345,8 @@ class HistoryServer:
             return "missing"
         if run_id in self.active_ids():
             return "busy"
+        if not any(e.id == run_id for e in history.load_entries(self.home)):
+            return "missing"
         existed = folder.is_dir()
         if existed:
             shutil.rmtree(folder, onexc=_make_writable_and_retry)
@@ -348,6 +379,17 @@ class HistoryServer:
 class _Handler(BaseHTTPRequestHandler):
     app: HistoryServer
     protocol_version = "HTTP/1.1"
+    timeout = 30  # an idle keep-alive connection gives its thread back
+
+    def setup(self) -> None:
+        super().setup()
+        with self.app._lock:
+            self.app._connections.add(self.connection)
+
+    def finish(self) -> None:
+        with self.app._lock:
+            self.app._connections.discard(self.connection)
+        super().finish()
 
     def log_message(self, format, *args) -> None:
         pass

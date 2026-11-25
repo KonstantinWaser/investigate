@@ -89,8 +89,8 @@ def test_empty_history_renders(client):
 
 
 def test_lists_runs_newest_first_with_columns(home, client):
-    _seed(home, "older topic", now=datetime(2026, 1, 1, tzinfo=UTC))
-    _seed(home, "newer topic", Depth.DEEP, now=datetime(2026, 2, 1, tzinfo=UTC))
+    _seed(home, "older topic", now=datetime(2026, 1, 1, 12, tzinfo=UTC))
+    _seed(home, "newer topic", Depth.DEEP, now=datetime(2026, 2, 1, 12, tzinfo=UTC))
     _, _, body = client.get("/")
     text = body.decode()
     assert text.index("Found a thing") < text.index(
@@ -114,7 +114,7 @@ def test_titles_are_escaped(home, client):
 
 
 def _entry(
-    rid, kind="investigation", created="2026-03-01T00:00:00+00:00", title="t", verdicts=None
+    rid, kind="investigation", created="2026-03-01T12:00:00+00:00", title="t", verdicts=None
 ):
     return history.HistoryEntry(rid, kind, "quick", "completed", title, created, None, verdicts)
 
@@ -132,14 +132,14 @@ def test_filters_by_kind_verdict_date_and_search(home, client):
         _entry(
             "fc",
             "fact-check",
-            "2026-02-10T00:00:00+00:00",
+            "2026-02-10T12:00:00+00:00",
             "Claim video",
             {"wrong": 2, "confirmed": 1},
         ),
     )
     history.upsert(
         home,
-        _entry("fc2", "fact-check", "2026-01-05T00:00:00+00:00", "Old claim", {"confirmed": 3}),
+        _entry("fc2", "fact-check", "2026-01-05T12:00:00+00:00", "Old claim", {"confirmed": 3}),
     )
     assert _ids_listed(client.get("/")[2]) == ["inv", "fc", "fc2"]
     assert _ids_listed(client.get("/?kind=fact-check")[2]) == ["fc", "fc2"]
@@ -433,3 +433,153 @@ def test_server_starts_and_stops_from_code(home):
         http.client.HTTPConnection("127.0.0.1", port, timeout=2).request("GET", "/")
     srv.start()
     srv.stop()
+
+
+# review round 2
+
+
+def test_aliased_ids_cannot_delete_a_running_run(home):
+    runner = BlockingRunner()
+    srv = HistoryServer(home, runner, port=0)
+    srv.start()
+    try:
+        c = Client(srv)
+        run_id = json.loads(
+            c.post("/api/runs", b'{"text": "x"}', {"Content-Type": "application/json"})[2]
+        )["id"]
+        assert runner.started.wait(10)
+        for alias in (f"{run_id}.", run_id.upper(), f"{run_id}.."):
+            status, _, _ = c.post(f"/runs/{alias}/delete")
+            assert status in (404, 409)
+        assert (home / "runs" / run_id).exists()
+        assert [e.id for e in history.load_entries(home)] == [run_id]
+    finally:
+        runner.release.set()
+        srv.wait_for_runs()
+        srv.stop()
+
+
+def test_delete_requires_an_index_entry(home, client):
+    result = _seed(home)
+    history.remove(home, result.id)
+    assert client.post(f"/runs/{result.id}/delete")[0] == 404
+    assert result.folder.exists()
+
+
+def test_a_crash_inside_execute_run_marks_the_run_failed(home, server, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("render exploded")
+
+    monkeypatch.setattr("investigate.service.render_report", boom)
+    client = Client(server)
+    status, _, resp = client.post(
+        "/api/runs", b'{"text": "x"}', {"Content-Type": "application/json"}
+    )
+    assert status == 202
+    server.wait_for_runs()
+    (entry,) = history.load_entries(home)
+    assert entry.id == json.loads(resp)["id"] and entry.status == "failed"
+    assert "render exploded" in (home / "runs" / entry.id / "agent.log").read_text(encoding="utf-8")
+
+
+def test_keep_alive_connection_dies_with_stop(home):
+    srv = HistoryServer(home, FakeRunner(), port=0)
+    srv.start()
+    conn = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=5)
+    conn.request("GET", "/")
+    first = conn.getresponse()
+    first.read()
+    assert first.status == 200
+    srv.stop()
+    with pytest.raises((OSError, http.client.HTTPException)):
+        conn.request("GET", "/")
+        assert conn.getresponse().status != 200
+        raise OSError("answered")
+    conn.close()
+
+
+def test_failed_attachment_move_still_returns_the_id_and_fails_the_run(home, server, monkeypatch):
+    def broken(*a, **k):
+        raise OSError("disk says no")
+
+    monkeypatch.setattr("investigate.server.shutil.move", broken)
+    body, headers = _multipart({"text": "x"}, [("attachments", "a.txt", b"1")])
+    status, _, resp = Client(server).post("/api/runs", body, headers)
+    assert status == 202
+    server.wait_for_runs()
+    (entry,) = history.load_entries(home)
+    assert entry.id == json.loads(resp)["id"] and entry.status == "failed"
+
+
+def test_concurrent_submits_are_all_tracked(home):
+    runner = BlockingRunner()
+    srv = HistoryServer(home, runner, port=0)
+    count = 12
+    ids = []
+
+    def submit(i):
+        ids.append(srv.submit(f"topic {i}", [], "quick", []))
+
+    try:
+        threads = [threading.Thread(target=submit, args=(i,)) for i in range(count)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        assert len(ids) == count
+        assert len(srv._workers) == count
+    finally:
+        runner.release.set()
+        assert srv.wait_for_runs()
+        assert not srv.active_ids()
+
+
+def test_page_survives_malformed_entries(home, client):
+    home.mkdir(exist_ok=True)
+    home.mkdir(exist_ok=True)
+    path = home / "index.json"
+    base = {
+        "id": "ok",
+        "kind": "investigation",
+        "depth": "quick",
+        "status": "completed",
+        "title": "fine",
+        "created": "2026-03-01T12:00:00+00:00",
+        "session_id": None,
+    }
+    runs = [
+        base,
+        {**base, "id": "b1", "verdicts": "lots"},
+        {**base, "id": "b2", "title": 5},
+        {**base, "id": "b3", "created": None},
+        {**base, "id": "b4", "verdicts": {"wrong": "x", "confirmed": 1}},
+        {**base, "id": "b5", "kind": ["x"], "status": {"a": 1}, "depth": 3},
+    ]
+    path.write_text(json.dumps({"runs": runs}), encoding="utf-8")
+    for query in ("/", "/?q=5", "/?verdict=wrong", "/?since=2026-01-01&kind=investigation"):
+        assert client.get(query)[0] == 200
+
+
+def test_local_day_uses_the_given_timezone():
+    from datetime import timedelta, timezone
+
+    from investigate.webpages import local_day
+
+    tz = timezone(timedelta(hours=2))
+    assert local_day("2026-03-01T23:30:00+00:00", tz) == "2026-03-02"
+    assert local_day("2026-03-01T23:30:00", tz) == "2026-03-02"  # naive means UTC
+    assert local_day("garbage", tz) == ""
+
+
+def test_other_loopback_address_is_served(home):
+    srv = HistoryServer(home, FakeRunner(), host="127.0.0.2", port=0)
+    try:
+        srv.start()
+    except OSError:
+        pytest.skip("127.0.0.2 not bindable here")
+    try:
+        conn = http.client.HTTPConnection("127.0.0.2", srv.port, timeout=5)
+        conn.request("GET", "/")
+        assert conn.getresponse().status == 200
+    finally:
+        srv.stop()

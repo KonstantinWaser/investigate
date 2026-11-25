@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, tzinfo
 from html import escape
 
 from investigate.history import HistoryEntry
@@ -49,19 +50,61 @@ class Filters:
     until: str = ""  # YYYY-MM-DD, inclusive
 
 
+def local_day(created: str, tz: tzinfo | None = None) -> str:
+    """The calendar day (YYYY-MM-DD) of an ISO timestamp in local time. A timestamp without an
+    offset is UTC. Empty when it cannot be parsed."""
+    try:
+        moment = datetime.fromisoformat(created)
+    except (TypeError, ValueError):
+        return ""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(tz).strftime("%Y-%m-%d")
+
+
+def local_minute(created: str) -> str:
+    try:
+        moment = datetime.fromisoformat(created)
+    except (TypeError, ValueError):
+        return str(created)[:16]
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def _clean(e: HistoryEntry) -> HistoryEntry:
+    """Coerce a hand-edited or newer-version entry so rendering cannot raise."""
+    verdicts = e.verdicts
+    if isinstance(verdicts, dict):
+        verdicts = {str(k): v for k, v in verdicts.items() if isinstance(v, int)}
+    else:
+        verdicts = None
+    created = e.created if isinstance(e.created, str) else ""
+    return replace(
+        e,
+        id=str(e.id),
+        kind=str(e.kind),
+        depth=str(e.depth),
+        status=str(e.status),
+        title=str(e.title),
+        created=created,
+        verdicts=verdicts,
+    )
+
+
 def apply_filters(entries: Sequence[HistoryEntry], f: Filters) -> list[HistoryEntry]:
     """Newest first, then filtered by kind, Verdict, date range and a title search."""
     needle = f.q.strip().lower()
     out = []
-    for e in sorted(entries, key=lambda e: e.created, reverse=True):
-        day = e.created[:10]
+    for e in sorted((_clean(e) for e in entries), key=lambda e: e.created, reverse=True):
+        day = local_day(e.created)
         if f.kind and e.kind != f.kind:
             continue
         if f.verdict and not (e.verdicts or {}).get(f.verdict):
             continue
-        if f.since and day < f.since:
+        if f.since and (not day or day < f.since):
             continue
-        if f.until and day > f.until:
+        if f.until and (not day or day > f.until):
             continue
         if needle and needle not in e.title.lower():
             continue
@@ -105,7 +148,7 @@ def _row(e: HistoryEntry, active: Collection[str]) -> str:
         f"<td>{escape(KIND_LABELS.get(e.kind, e.kind))}</td>"
         f"<td>{escape(e.depth)}</td>"
         f"<td>{status}</td>"
-        f"<td>{escape(e.created[:16].replace('T', ' '))}</td>"
+        f"<td>{escape(local_minute(e.created))}</td>"
         f"<td>{_verdict_cell(e)}</td>"
         f"<td>{action}</td>"
         "</tr>"
