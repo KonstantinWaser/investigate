@@ -4,7 +4,7 @@ Settled in a grilling session before any code. Vocabulary is in `GLOSSARY.md`.
 
 ## Distribution
 
-Public GitHub repo under Konstantin's personal account, MIT. Anyone can clone it and use their own models.
+Public GitHub repo under the owner's personal account, MIT. Anyone can clone it and use their own models.
 
 ## Host and input
 

@@ -16,7 +16,7 @@ import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from investigate import browser
 from investigate.config import PermissionMode
@@ -48,6 +48,7 @@ class RunnerOutcome:
     resume_unavailable: bool = False  # a resume failed because the session is unknown or gone
 
 
+@runtime_checkable
 class Runner(Protocol):
     name: str
 
