@@ -326,31 +326,32 @@ class TrayApp:
         # An outage is toasted once, again when the error changes, and when it is over. A manual
         # check always answers.
         # A logged-out source is an outage of that source only; the others have already run.
-        problem = (result.login_required + result.errors or [None])[0]
+        # Every outage is shown, whether or not items were created in the same check.
+        busy = bool(result.source_busy)
+        problems = result.login_required + result.errors
+        problem = " | ".join(problems) if problems else None
         outage = result.unreachable or bool(result.login_required)
-        recovered = problem is None and self._inbox_problem is not None
-        retry = result.unreachable or bool(result.source_busy)
-        announce = (
-            bool(problem) and (manual or outage) and (manual or problem != self._inbox_problem)
-        )
-        problem_toast = Toast("Inbox check had problems", toast_text(problem or ""), history_url)
+        # A busy skip observed nothing about that source: it is neither news nor a recovery.
+        recovered = problem is None and self._inbox_problem is not None and not busy
+        retry = result.unreachable or busy
+        changed = problem != self._inbox_problem
+        announce = bool(problem) and (manual or outage) and (manual or changed)
         if result.created:
             self._tell(Toast(*inbox_toast(result.created), history_url))
-            if announce and result.login_required:
-                self._tell(problem_toast)
-        elif problem and (manual or outage):
-            if announce:
-                self._tell(problem_toast)
-        elif recovered and not manual:
-            self._tell(Toast("Inbox", "The inbox is reachable again.", history_url))
-        elif manual and not result.source_busy:
-            self._tell(Toast("Inbox", "Nothing new in the inbox.", history_url))
-        if manual and result.source_busy:
+        if announce:
+            text = toast_text(problem or "")
+            self._tell(Toast("Inbox check had problems", text, history_url))
+        elif not result.created and not problem:
+            if recovered and not manual:
+                self._tell(Toast("Inbox", "The inbox is reachable again.", history_url))
+            elif manual and not busy:
+                self._tell(Toast("Inbox", "Nothing new in the inbox.", history_url))
+        if manual and busy:
             note = "Skipped, the browser profile is in use. Retrying soon."
             self._tell(Toast("Inbox", toast_text(f"{result.source_busy[0]}. {note}"), history_url))
         for message in result.gave_up:
             self._tell(Toast("Inbox gave up on an item", toast_text(message), history_url))
-        if problem is None or outage:
+        if (problem is None and not busy) or outage:
             self._inbox_problem = problem
         return not retry
 

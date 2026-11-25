@@ -341,3 +341,86 @@ def test_a_logged_out_instagram_is_login_required(home):
     )
     with pytest.raises(LoginRequired):
         reader()
+
+
+# review fixes
+
+
+def test_the_cursor_is_url_encoded():
+    seen = []
+
+    def collection(path):
+        seen.append(path)
+        if "max_id=" not in path:
+            return 200, {**fixture("collection_page1.json"), "next_max_id": "a b&c=d/e"}
+        return 200, {"items": [], "more_available": False}
+
+    get = FakeGet({**_routes(), "/api/v1/feed/collection/9002/posts/": collection})
+    InstagramApi(get).collection_posts("To Check")
+    assert seen[1].endswith("?max_id=a%20b%26c%3Dd%2Fe")
+
+
+def test_the_collection_list_is_paged_too():
+    page1 = {
+        "items": [{"collection_id": "1", "collection_name": "Other"}],
+        "more_available": True,
+        "next_max_id": "c2",
+    }
+
+    def listing(path):
+        return (200, fixture("collections_list.json")) if "max_id=c2" in path else (200, page1)
+
+    get = FakeGet({**_routes(), "/api/v1/collections/list/": listing})
+    posts = InstagramApi(get).collection_posts("To Check")
+    assert len(posts) == 3
+    assert get.paths[1] == "/api/v1/collections/list/?max_id=c2"
+
+
+def test_the_collection_list_paging_has_the_same_cap():
+    endless = {"items": [], "more_available": True, "next_max_id": "again"}
+    get = FakeGet({"/api/v1/collections/list/": (200, endless)})
+    with pytest.raises(InstagramError):
+        InstagramApi(get, max_pages=3).collection_posts("To Check")
+    assert len(get.paths) == 3
+
+
+def test_the_browser_starts_on_a_static_page_and_blocks_everything_but_get():
+    from investigate import instagram
+
+    assert instagram.START_PATH == "/robots.txt"
+
+    class Request:
+        def __init__(self, method):
+            self.method = method
+
+    class Route:
+        def __init__(self, method):
+            self.request, self.done = Request(method), None
+
+        def abort(self):
+            self.done = "abort"
+
+        def continue_(self):
+            self.done = "continue"
+
+    for method, expected in [("GET", "continue"), ("HEAD", "continue"), ("POST", "abort"),
+                             ("DELETE", "abort"), ("PUT", "abort")]:  # fmt: skip
+        route = Route(method)
+        instagram.allow_only_reads(route)
+        assert route.done == expected, method
+
+
+def test_a_stalled_request_is_a_plain_error_and_the_script_has_a_timeout():
+    from investigate import instagram
+
+    assert "AbortController" in instagram._FETCH_JS and "setTimeout" in instagram._FETCH_JS
+
+    def stalled(path):
+        raise RuntimeError("The operation was aborted")
+
+    get = instagram.make_get_json(stalled)
+    with pytest.raises(InstagramError, match="aborted") as info:
+        get("/api/v1/collections/list/")
+    assert not isinstance(info.value, LoginRequired)
+    assert instagram.make_get_json(lambda p: [200, '{"a": 1}'])("/x") == (200, {"a": 1})
+    assert instagram.make_get_json(lambda p: [500, "<html>"])("/x") == (500, "<html>")

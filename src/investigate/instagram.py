@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from urllib.parse import quote
 
 from investigate.attachments import Upload
 from investigate.browser import is_logged_in, profile_dir, profile_in_use
@@ -191,16 +192,27 @@ class InstagramApi:
             raise InstagramError(f"Instagram answered {status} for {path.split('?')[0]}")
         return data
 
+    def _find_collection(self, name: str) -> str | None:
+        cursor: str | None = None
+        for _ in range(self._max_pages):
+            path = "/api/v1/collections/list/" + _cursor_query(cursor)
+            data = self._json(path)
+            found = find_collection(data, name)
+            if found is not None:
+                return found
+            cursor = _next_cursor(data)
+            if not cursor:
+                break
+        return None
+
     def collection_posts(self, name: str) -> list[Post]:
-        collection = find_collection(self._json("/api/v1/collections/list/"), name)
+        collection = self._find_collection(name)
         if collection is None:
             raise InstagramError(f"no saved Collection named {name!r} was found")
         posts: list[Post] = []
         cursor: str | None = None
         for _ in range(self._max_pages):
-            path = f"/api/v1/feed/collection/{collection}/posts/"
-            if cursor:
-                path += f"?max_id={cursor}"
+            path = f"/api/v1/feed/collection/{collection}/posts/" + _cursor_query(cursor)
             page, cursor = parse_collection_page(self._json(path))
             posts += page
             if not cursor:
@@ -208,21 +220,69 @@ class InstagramApi:
         return posts
 
 
+def _next_cursor(data: Any) -> str | None:
+    cursor = data.get("next_max_id") if isinstance(data, dict) else None
+    more = isinstance(data, dict) and data.get("more_available") is True
+    return cursor if more and isinstance(cursor, str) and cursor else None
+
+
+def _cursor_query(cursor: str | None) -> str:
+    return f"?max_id={quote(cursor, safe='')}" if cursor else ""
+
+
 # the browser
 
 
-_FETCH_JS = """async ([path, appId]) => {
-  const r = await fetch(path, {credentials: 'include', headers: {'x-ig-app-id': appId}});
-  return [r.status, await r.text()];
+FETCH_TIMEOUT_MS = 30_000
+START_PATH = "/robots.txt"  # a static same-origin page: cookies apply, no web app scripts run
+_FETCH_JS = """async ([path, appId, timeoutMs]) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const r = await fetch(path, {
+      credentials: 'include', headers: {'x-ig-app-id': appId}, signal: controller.signal,
+    });
+    return [r.status, await r.text()];
+  } finally {
+    clearTimeout(timer);
+  }
 }"""
 
 Session = Callable[[Path], contextlib.AbstractContextManager[GetJson]]
 
 
+def allow_only_reads(route: Any) -> None:
+    """A Playwright route handler: only GET and HEAD requests leave the browser."""
+    if route.request.method in ("GET", "HEAD"):
+        route.continue_()
+    else:
+        route.abort()
+
+
+def make_get_json(evaluate: Callable[[str], Any]) -> GetJson:
+    """`evaluate(path)` returns [status, text] (the in-page fetch). A stalled or failed request
+    becomes an `InstagramError`, so it can never hold the locks."""
+
+    def get_json(path: str) -> tuple[int, Any]:
+        try:
+            status, text = evaluate(path)
+        except Exception as exc:
+            raise InstagramError(
+                f"the request to Instagram failed or timed out ({_one_line(str(exc))[:150]})"
+            ) from exc
+        try:
+            return status, json.loads(text)
+        except ValueError:
+            return status, text
+
+    return get_json
+
+
 @contextlib.contextmanager
 def playwright_session(profile: Path) -> Iterator[GetJson]:
-    """A Chrome on the profile, on instagram.com, whose requests carry the login cookies.
-    Only GETs are made. The caller holds the profile lock."""
+    """A Chrome on the profile, on a static instagram.com page, whose requests carry the login
+    cookies. Only GETs leave the browser (`allow_only_reads`) and no web app script runs. The
+    caller holds the profile lock."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -234,19 +294,12 @@ def playwright_session(profile: Path) -> Iterator[GetJson]:
             str(profile), channel="chrome", headless=True
         )
         try:
+            context.route("**/*", allow_only_reads)
             page = context.pages[0] if context.pages else context.new_page()
-            page.goto(f"{BASE_URL}/", wait_until="domcontentloaded")
-            if "/accounts/login" in page.url:
-                raise LoginRequired(f"Instagram is logged out. {LOGIN_HINT}")
-
-            def get_json(path: str) -> tuple[int, Any]:
-                status, text = page.evaluate(_FETCH_JS, [path, WEB_APP_ID])
-                try:
-                    return status, json.loads(text)
-                except ValueError:
-                    return status, text
-
-            yield get_json
+            page.goto(f"{BASE_URL}{START_PATH}", wait_until="domcontentloaded")
+            yield make_get_json(
+                lambda path: page.evaluate(_FETCH_JS, [path, WEB_APP_ID, FETCH_TIMEOUT_MS])
+            )
         finally:
             context.close()
 
@@ -256,7 +309,7 @@ def browser_reader(
 ) -> Callable[[], list[Post]]:
     """A function that reads the Collection. It holds the profile lock while the browser is
     open. A profile in use (a deep Run, `login`) is `SourceBusy`; a profile never logged in or
-    an Instagram that shows the login page is `LoginRequired`."""
+    an Instagram that answers 401 or login_required is `LoginRequired`."""
 
     def read() -> list[Post]:
         if not is_logged_in(home):

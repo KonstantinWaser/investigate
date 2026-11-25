@@ -35,7 +35,7 @@ from investigate.capture import capture_csp, capture_page
 from investigate.config import Config, ConfigError, Depth, load_config, validate_raw
 from investigate.factcheck import KIND as FACT_CHECK
 from investigate.followup import FollowupError, FollowupManager
-from investigate.inbox import Notices
+from investigate.inbox import active_notices
 from investigate.runner import Runner
 from investigate.runqueue import QueueClosed, RunQueue
 from investigate.service import KIND, execute_run, fail_run, reserve_run
@@ -584,7 +584,7 @@ class _Handler(BaseHTTPRequestHandler):
                 q.get("until", ""),
             )
             entries = history.load_entries(self.app.home)
-            notices = [f"{k}: {v}" for k, v in Notices(self.app.home).all().items()]
+            notices = [f"{k}: {v}" for k, v in active_notices(self.app.home).items()]
             page = history_page(
                 apply_filters(entries, filters),
                 filters,

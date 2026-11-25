@@ -237,10 +237,8 @@ def default_sources(config: InboxConfig, home: Path) -> list[InboxSource]:
     from investigate.youtube import YouTubeSource, YtDlpClient
 
     sources: list[InboxSource] = []
-    if config.playlist:
-        client = YtDlpClient(config.playlist, config.cookies, config.subtitle_languages)
-        limit = config.max_duration_minutes * 60
-        sources.append(YouTubeSource(client, WhisperTranscriber(), max_duration_seconds=limit))
+    # Instagram first: it holds the profile lock only while listing, so it is free again
+    # before any Run of this check (which may take the lock) starts.
     if config.instagram_collection:
         from investigate.instagram import InstagramSource, browser_reader
 
@@ -251,6 +249,10 @@ def default_sources(config: InboxConfig, home: Path) -> list[InboxSource]:
                 max_duration_seconds=config.instagram_max_duration_minutes * 60,
             )
         )
+    if config.playlist:
+        client = YtDlpClient(config.playlist, config.cookies, config.subtitle_languages)
+        limit = config.max_duration_minutes * 60
+        sources.append(YouTubeSource(client, WhisperTranscriber(), max_duration_seconds=limit))
     return sources
 
 
@@ -361,6 +363,28 @@ class Notices:
         current = self.all()
         if current.pop(source, None) is not None:
             _write_json(self._path, current)
+
+
+def configured_source_names(config: InboxConfig) -> set[str]:
+    names = set()
+    if config.playlist:
+        names.add("youtube")
+    if config.instagram_collection:
+        names.add("instagram")
+    return names
+
+
+def active_notices(home: Path) -> dict[str, str]:
+    """The notices of sources that are still configured. A notice of a source that was removed
+    from config.toml is deleted. An unreadable config shows every notice and deletes none."""
+    notices = Notices(home)
+    try:
+        wanted = configured_source_names(load_inbox_config(home))
+    except ConfigError:
+        return notices.all()
+    for source in set(notices.all()) - wanted:
+        notices.clear(source)
+    return notices.all()
 
 
 class InboxState:

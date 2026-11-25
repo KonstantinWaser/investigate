@@ -149,6 +149,7 @@ def test_the_history_page_shows_inbox_notices_escaped():
 def test_the_server_serves_the_notice_on_the_history_page(home):
     from tests.test_server import Client
 
+    _write(home, '[inbox.instagram]\ncollection = "To Check"\n')
     Notices(home).set("instagram", "Instagram is logged out. Run investigate login.")
     server = HistoryServer(home, FakeRunner(), port=0)
     server.start()
@@ -254,3 +255,88 @@ def test_the_fact_check_prompt_covers_posts_images_and_the_no_claims_case():
     prompt = build_prompt("item", Depth.QUICK, "English", kind="fact-check")
     assert "Instagram" in prompt and "image" in prompt
     assert "empty claims list" in prompt
+
+
+# review fixes
+
+
+def test_instagram_is_read_before_youtube_so_its_lock_is_free_before_any_run_starts(home):
+    _write(
+        home,
+        '[inbox.youtube]\nplaylist = "PLabcdefghijklmnop"\n'
+        '[inbox.instagram]\ncollection = "To Check"\n',
+    )
+    names = [s.name for s in default_sources(load_inbox_config(home), home)]
+    assert names == ["instagram", "youtube"]
+
+
+class Switch(Named):
+    mode = "ok"
+
+    def list_items(self):
+        if self.mode == "logged_out":
+            raise LoginRequired("Instagram is logged out. Run investigate login.")
+        if self.mode == "busy":
+            raise SourceBusy("the browser profile is in use")
+        return super().list_items()
+
+
+def test_a_busy_skip_between_logged_out_checks_is_not_a_recovery(home):
+    source = Switch("instagram", titles=())
+    source.mode = "logged_out"
+    app, notifier = _tray(home, [source])
+    app.start()
+    try:
+        assert _wait(lambda: any("logged out" in t.message for t in notifier.toasts))
+        assert _wait(lambda: not app.inbox.checking)
+        source.mode = "busy"
+        app._check_inbox(False)
+        source.mode = "logged_out"
+        app._check_inbox(False)
+        assert len([t for t in notifier.toasts if "logged out" in t.message]) == 1
+        assert not [t for t in notifier.toasts if "reachable again" in t.message]
+        source.mode = "ok"
+        app._check_inbox(False)
+        assert any("reachable again" in t.message for t in notifier.toasts)
+    finally:
+        app.shutdown()
+
+
+def test_a_youtube_outage_is_toasted_even_when_instagram_created_items(home):
+    app, notifier = _tray(
+        home, [Named("instagram", titles=("Reel",)), Named("youtube", fail_list=OSError("offline"))]
+    )
+    app.start()
+    try:
+        assert _wait(lambda: any(t.title == "Inbox check had problems" for t in notifier.toasts))
+        assert any("1 new Fact-check" in t.title for t in notifier.toasts)
+        assert _wait(lambda: not app.inbox.checking)
+        app._check_inbox(False)  # still the same outage: not toasted again
+        assert len([t for t in notifier.toasts if t.title == "Inbox check had problems"]) == 1
+    finally:
+        app.shutdown()
+
+
+def test_a_notice_for_a_source_that_is_no_longer_configured_is_dropped(home):
+    from investigate.inbox import active_notices
+
+    Notices(home).set("instagram", "Instagram is logged out.")
+    Notices(home).set("youtube", "Some problem.")
+    _write(home, '[inbox.instagram]\ncollection = "To Check"\n')
+    assert active_notices(home) == {"instagram": "Instagram is logged out."}
+    assert Notices(home).all() == {"instagram": "Instagram is logged out."}
+    _write(home, "")
+    assert active_notices(home) == {} and Notices(home).all() == {}
+
+
+def test_the_history_page_hides_the_notice_after_the_collection_is_removed(home):
+    from tests.test_server import Client
+
+    Notices(home).set("instagram", "Instagram is logged out.")
+    server = HistoryServer(home, FakeRunner(), port=0)
+    server.start()
+    try:
+        _, _, body = Client(server).get("/")
+    finally:
+        server.stop()
+    assert b"logged out" not in body
