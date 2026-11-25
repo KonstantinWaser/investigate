@@ -51,6 +51,7 @@ class Config:
     language: str = "English"
     contexts: tuple[ContextFile, ...] = ()  # in config order
     depths: dict[Depth, DepthSettings] = field(default_factory=lambda: dict(DEFAULT_DEPTHS))
+    max_attachment_mb: float = 25.0  # size limit per attached file or image
 
     @property
     def context_files(self) -> tuple[str, ...]:
@@ -76,6 +77,9 @@ language = "English"
 #     {name = "studies", path = "~/notes/studies.md"},
 # ]
 context_files = []
+
+# Largest file or image you can attach to an Item, in megabytes.
+max_attachment_mb = 25
 
 # Wall-clock limit and model per Depth. An empty model means the CLI default.
 [depths.quick]
@@ -160,6 +164,10 @@ def _parse(raw: dict, path: Path) -> Config:
         raise ConfigError(f"{path}: language must be a non-empty string")
     contexts = _parse_contexts(raw.get("context_files", []), path)
 
+    max_mb = raw.get("max_attachment_mb", 25)
+    if isinstance(max_mb, bool) or not isinstance(max_mb, int | float) or max_mb <= 0:
+        raise ConfigError(f"{path}: max_attachment_mb must be a positive number")
+
     depths = dict(DEFAULT_DEPTHS)
     raw_depths = raw.get("depths", {})
     if not isinstance(raw_depths, dict):
@@ -179,4 +187,4 @@ def _parse(raw: dict, path: Path) -> Config:
         if model is not None and not isinstance(model, str):
             raise ConfigError(f"{path}: depths.{name}.model must be a string")
         depths[depth] = DepthSettings(float(minutes), model or None)
-    return Config(mode, language.strip(), contexts, depths)
+    return Config(mode, language.strip(), contexts, depths, float(max_mb))
