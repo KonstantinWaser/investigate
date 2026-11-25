@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import traceback
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
 from investigate import history
+from investigate.attachments import AttachmentSource, check_attachments, store_attachments
 from investigate.config import Config, Depth, load_config
 from investigate.prompt import RESULT_FILE, build_prompt
 from investigate.report import ReportInput, render_report
@@ -81,20 +84,34 @@ def execute_run(
     runner: Runner,
     config: Config | None = None,
     now: datetime | None = None,
+    attachments: Sequence[AttachmentSource] = (),
 ) -> RunResult:
-    """Run one Investigation end to end. Runner problems become a `failed` Run, not an exception."""
+    """Run one Investigation end to end. Runner problems become a `failed` Run, not an exception.
+
+    `attachments` are copied into the run folder. A missing or oversize one raises
+    `AttachmentError` before any run folder exists.
+    """
     config = config or load_config(home)
     now = now or datetime.now(UTC)
-    folder = _new_run_folder(home, now.astimezone(), item)
+    max_bytes = int(config.max_attachment_mb * 1_048_576)
+    check_attachments(attachments, max_bytes)
+    # With no text, the first attachment's name stands in for the Item in folder name and title.
+    label = item if item.strip() else (getattr(attachments[0], "name", "") if attachments else "")
+    folder = _new_run_folder(home, now.astimezone(), label)
     run_id = folder.name
     created = now.isoformat(timespec="seconds")
     (folder / "item.md").write_text(item, encoding="utf-8")
+    try:
+        stored = tuple(store_attachments(folder, attachments, max_bytes))
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)  # no half-made run folder
+        raise
     session_id = str(uuid.uuid4())
 
     def entry(status: str, title: str, sid: str | None) -> history.HistoryEntry:
         return history.HistoryEntry(run_id, KIND, depth.value, status, title, created, sid)
 
-    history.upsert(home, entry("running", _item_title(item), session_id))
+    history.upsert(home, entry("running", _item_title(label), session_id))
 
     settings = config.depths[depth]
     # A Context file that is missing is noted in the run log and skipped, never fatal.
@@ -107,7 +124,7 @@ def execute_run(
     ]
     context_files = tuple(path for _, path in contexts)
     request = RunRequest(
-        prompt=build_prompt(item, depth, config.language, contexts),
+        prompt=build_prompt(item, depth, config.language, contexts, stored),
         workdir=folder,
         session_id=session_id,
         timeout_seconds=settings.timeout_minutes * 60,
@@ -138,7 +155,7 @@ def execute_run(
         status = "partial"
     else:
         status = "completed"
-    title = parsed.structured.title if parsed.structured else _item_title(item)
+    title = parsed.structured.title if parsed.structured else _item_title(label)
     sid = outcome.session_id or session_id
 
     html = render_report(
@@ -152,6 +169,7 @@ def execute_run(
             result=parsed,
             error=outcome.error if status == "failed" else None,
             contexts=tuple(name for name, _ in contexts),
+            attachments=stored,
         )
     )
     report_path = folder / "report.html"
@@ -170,6 +188,7 @@ def execute_run(
                 "model": settings.model,
                 "timeout_minutes": settings.timeout_minutes,
                 "result_problems": list(parsed.problems),
+                "attachments": [{"name": a.name, "size": a.size} for a in stored],
             },
             indent=2,
         ),

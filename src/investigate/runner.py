@@ -90,6 +90,7 @@ def build_command(command: list[str], request: RunRequest) -> list[str]:
         # rule did not match in practice. The pattern is anchored to the run folder.
         allowed = ["WebSearch", "WebFetch", "Agent", f"Edit({run_folder}/**)"]
         allowed += [f"Read({_rule_path(p)})" for p in request.context_files]
+        allowed.append(f"Read({run_folder}/attachments/**)")  # the Item's attached files
         cmd += ["--permission-mode", "dontAsk", "--allowedTools", *allowed]
     return cmd
 

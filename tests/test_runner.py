@@ -115,3 +115,9 @@ def test_runner_claude_not_on_path(tmp_path, monkeypatch, found):
     outcome = ClaudeCodeRunner().run(_request(tmp_path))
     assert not outcome.ok
     assert "not found on PATH" in outcome.error
+
+
+def test_allowlist_reads_attachments_of_the_run_folder(tmp_path):
+    cmd = build_command(["claude"], _request(tmp_path, permission_mode=PermissionMode.ALLOWLIST))
+    allowed = cmd[cmd.index("--allowedTools") + 1 :]
+    assert f"Read({_rule_path(tmp_path)}/attachments/**)" in allowed

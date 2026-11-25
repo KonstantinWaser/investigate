@@ -1,17 +1,21 @@
 """Render the Report: one self-contained HTML page, the same template for every Run.
 
-All agent text is escaped. The page has inline CSS and no scripts, fonts or images, so viewing
-it makes no network request. Raw HTML in the Markdown body is escaped and images are disabled.
+All agent text is escaped. The page has inline CSS and no scripts or fonts, so viewing it makes no
+network request. The only images are the Item's own attached images, shown as thumbnails by
+relative path into `attachments/` of the run folder the page sits in. Raw HTML in the Markdown
+body is escaped and images in it are disabled.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from html import escape
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from markdown_it import MarkdownIt
 
+from investigate.attachments import Attachment
 from investigate.result import ParsedResult
 
 _md = MarkdownIt("commonmark", {"html": False}).disable("image")
@@ -47,6 +51,8 @@ border:1px solid var(--line);border-radius:1rem;padding:0 .5rem;color:var(--mute
 .cites{margin:.5rem 0 0;padding-left:1.2rem;font-size:.9rem}
 .note{color:var(--muted)}
 details{margin-top:1.5rem}
+.thumbs{display:flex;flex-wrap:wrap;gap:.75rem;margin:.5rem 0}
+.thumbs img{max-width:12rem;max-height:9rem;border:1px solid var(--line);border-radius:.4rem}
 pre{white-space:pre-wrap;word-break:break-word;background:var(--card);padding:.75rem;\
 border-radius:.5rem;font-size:.85rem}
 """
@@ -63,6 +69,7 @@ class ReportInput:
     result: ParsedResult
     error: str | None = None
     contexts: tuple[str, ...] = ()  # Context names in config order, one subsection each
+    attachments: tuple[Attachment, ...] = ()
 
 
 def _safe_link(url: str, label: str) -> str:
@@ -120,6 +127,38 @@ def _relevance(result: ParsedResult, contexts: tuple[str, ...]) -> str:
     return "".join(parts)
 
 
+_URL = re.compile(r"https?://[^\s<>\"')\]]+")
+
+
+def _item_section(item: str, attachments: tuple[Attachment, ...]) -> str:
+    parts = ["<h2>Item</h2>"]
+    if item.strip():
+        parts.append(f"<pre>{escape(item)}</pre>")
+    urls = list(dict.fromkeys(u.rstrip(".,;:!?") for u in _URL.findall(item)))
+    if urls:
+        rows = "".join(f"<li>{_safe_link(u, u)}</li>" for u in urls)
+        parts.append(f'<p class="note">URLs</p><ul class="cites">{rows}</ul>')
+    if attachments:
+        rows = []
+        for a in attachments:
+            href = escape(quote(a.relative_path), quote=True)
+            rows.append(
+                f'<li><a href="{href}">{escape(a.name)}</a> '
+                f'<span class="note">{a.size:,} bytes</span></li>'
+            )
+        parts.append(f'<p class="note">Attachments</p><ul class="cites">{"".join(rows)}</ul>')
+        images = [a for a in attachments if a.is_image]
+        if images:
+            thumbs = "".join(
+                f'<a href="{escape(quote(a.relative_path), quote=True)}">'
+                f'<img src="{escape(quote(a.relative_path), quote=True)}" '
+                f'alt="{escape(a.name, quote=True)}" loading="lazy"></a>'
+                for a in images
+            )
+            parts.append(f'<div class="thumbs">{thumbs}</div>')
+    return "<section>" + "".join(parts) + "</section>"
+
+
 def render_report(data: ReportInput) -> str:
     structured = data.result.structured
     title = structured.title if structured else data.title
@@ -149,6 +188,6 @@ def render_report(data: ReportInput) -> str:
         f'<div class="meta">{meta}</div>'
         f"{''.join(notices)}{summary}{_findings(data.result)}"
         f"{_relevance(data.result, data.contexts)}{body_html}"
-        f"<details><summary>Item</summary><pre>{escape(data.item)}</pre></details>"
+        f"{_item_section(data.item, data.attachments)}"
         "</main></body></html>\n"
     )
