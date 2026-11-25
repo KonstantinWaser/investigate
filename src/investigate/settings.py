@@ -30,6 +30,7 @@ from investigate.config import (
     load_config,
     validate_raw,
 )
+from investigate.history import _replace
 
 
 @dataclass(frozen=True)
@@ -320,7 +321,7 @@ def _write_atomically(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, path)
+        _replace(temp, path)  # retried: another thread may hold the file open for a moment
     finally:
         with contextlib.suppress(OSError):
             temp.unlink()

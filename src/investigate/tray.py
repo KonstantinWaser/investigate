@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from investigate import browser
-from investigate.autostart import Autostart, startup_command
+from investigate.autostart import Autostart, is_ephemeral, startup_command
 from investigate.config import Config, ConfigError, load_config, parse_hotkey
 from investigate.hotkeys import HotkeyBackend, HotkeyError
 from investigate.instance import InstanceLock, recover_interrupted, running_url
@@ -116,7 +116,7 @@ class TrayApp:
         quit_grace: float = QUIT_GRACE_SECONDS,
         hotkeys: HotkeyBackend | None = None,
         autostart: Autostart | None = None,
-        get_startup_command: Callable[[], list[str]] = startup_command,
+        get_startup_command: Callable[[], list[str]] | None = None,
     ) -> None:
         self.home = home
         self.notifier = notifier
@@ -124,7 +124,7 @@ class TrayApp:
         self._login, self._stop_login = login, stop_login
         self._quit_grace = quit_grace
         self.hotkeys, self.autostart = hotkeys, autostart
-        self._startup_command = get_startup_command
+        self._startup_command = get_startup_command or (lambda: startup_command(home=home))
         self._apply_lock = threading.Lock()
         self.server = HistoryServer(
             home,
@@ -188,13 +188,13 @@ class TrayApp:
         except ConfigError as exc:
             self._tell(Toast("Settings not applied", toast_text(str(exc)), self._settings_url()))
             return
-        self.apply_config(config)
+        self.apply_config(config, at_startup=True)
 
-    def apply_config(self, config: Config) -> None:
+    def apply_config(self, config: Config, *, at_startup: bool = False) -> None:
         """Make a new Config take effect in the tray: no restart needed for either setting."""
         with self._apply_lock:
             self._sync_hotkey(config.hotkey)
-            self._sync_autostart(config.start_at_login)
+            self._sync_autostart(config.start_at_login, at_startup)
 
     def _sync_hotkey(self, text: str) -> None:
         if self.hotkeys is None:
@@ -213,13 +213,33 @@ class TrayApp:
                 )
             )
 
-    def _sync_autostart(self, wanted: bool) -> None:
+    def _sync_autostart(self, wanted: bool, at_startup: bool) -> None:
         if self.autostart is None:
             return
         try:
             command = self._startup_command()
             if wanted and not self.autostart.matches(command):
+                temporary = is_ephemeral(Path(command[0]))
+                if at_startup and temporary and self.autostart.enabled():
+                    # The entry may point at the user's real install; a scratch install that
+                    # happens to start a tray must not take it over.
+                    self._tell(
+                        Toast(
+                            "Start at login not updated",
+                            toast_text(f"Left as it is: this tray runs from {command[0]}"),
+                            self._settings_url(),
+                        )
+                    )
+                    return
                 self.autostart.enable(command)
+                if temporary:
+                    self._tell(
+                        Toast(
+                            "Start at login uses a temporary install",
+                            toast_text(f"It starts {command[0]}, which may be deleted."),
+                            self._settings_url(),
+                        )
+                    )
             elif not wanted and self.autostart.enabled():
                 self.autostart.disable()
         except Exception as exc:  # registry or file errors: say so, keep the tray running

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from investigate import browser, history
 from investigate.attachments import AttachmentError
-from investigate.autostart import default_autostart
+from investigate.autostart import default_autostart, entry_suffix
 from investigate.config import ConfigError, Depth, data_home, load_config
 from investigate.hotkeys import default_hotkeys
 from investigate.instance import InstanceLock, recover_interrupted, running_url
@@ -43,6 +43,12 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("login", help="Open the browser profile to log in to YouTube, Instagram, X.")
     tray = sub.add_parser("tray", help="Run the tray app: icon, quick capture and the server.")
     tray.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port (default 8765).")
+    tray.add_argument(
+        "--home",
+        type=Path,
+        help="Data folder to use instead of INVESTIGATE_HOME or ~/.investigate. Start at login "
+        "adds it when the folder is not the default one.",
+    )
     serve = sub.add_parser("serve", help="Serve the History and Reports on localhost.")
     serve.add_argument("--host", default="127.0.0.1", help="Address to bind (default 127.0.0.1).")
     serve.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port (default 8765).")
@@ -104,13 +110,15 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
                 file=sys.stderr,
             )
             return 2
+        if args.home:
+            home = args.home.expanduser().resolve()
         return run_tray(
             home,
             runner or ClaudeCodeRunner(),
             tray_gui.run,
             port=args.port,
             hotkeys=default_hotkeys(),
-            autostart=default_autostart(),
+            autostart=default_autostart(suffix=entry_suffix(home)),
         )
     if args.command == "serve":
         return _serve(home, args, runner or ClaudeCodeRunner())

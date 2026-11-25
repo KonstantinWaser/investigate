@@ -289,7 +289,8 @@ class FakeAutostart:
 
 
 def _tray(home, **kwargs):
-    return _app(home, get_startup_command=lambda: ["py", "-m", "investigate.cli", "tray"], **kwargs)
+    kwargs.setdefault("get_startup_command", lambda: ["py", "-m", "investigate.cli", "tray"])
+    return _app(home, **kwargs)
 
 
 def test_the_settings_menu_item_opens_the_settings_page(home):
@@ -350,7 +351,8 @@ def test_a_hotkey_that_cannot_register_shows_a_notice_that_links_to_settings(hom
         app.shutdown()
 
 
-def test_start_at_login_follows_the_setting_both_ways_and_is_repaired_at_start(home):
+def test_start_at_login_follows_the_setting_both_ways_and_is_repaired_at_start(home, monkeypatch):
+    monkeypatch.setattr("investigate.tray.is_ephemeral", lambda path: False)
     autostart = FakeAutostart()
     app = _tray(home, autostart=autostart)
     app.start()

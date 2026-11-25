@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import tomllib
@@ -156,6 +157,11 @@ model = "opus"
 """
 
 
+def default_home() -> Path:
+    """`~/.investigate`, the data folder when nothing overrides it."""
+    return (Path.home() / ".investigate").expanduser().resolve()
+
+
 def data_home() -> Path:
     """The data folder: `$INVESTIGATE_HOME`, else `~/.investigate`."""
     override = os.environ.get(HOME_ENV)
@@ -239,7 +245,11 @@ def validate_raw(raw: dict, base: Path) -> tuple[Config, dict[str, str]]:
         contexts = ()
 
     max_mb = raw.get("max_attachment_mb", 25)
-    if isinstance(max_mb, bool) or not isinstance(max_mb, int | float) or max_mb <= 0:
+    if (
+        isinstance(max_mb, bool)
+        or not isinstance(max_mb, int | float)
+        or not (math.isfinite(max_mb) and max_mb > 0)
+    ):
         errors["max_attachment_mb"] = "max_attachment_mb must be a positive number"
         max_mb = defaults.max_attachment_mb
     browser = raw.get("browser", False)
@@ -285,7 +295,11 @@ def validate_raw(raw: dict, base: Path) -> tuple[Config, dict[str, str]]:
             continue
         preset = DEFAULT_DEPTHS[depth]
         minutes = values.get("timeout_minutes", preset.timeout_minutes)
-        if isinstance(minutes, bool) or not isinstance(minutes, int | float) or minutes <= 0:
+        if (
+            isinstance(minutes, bool)
+            or not isinstance(minutes, int | float)
+            or not (math.isfinite(minutes) and minutes > 0)
+        ):
             errors[f"depths.{name}.timeout_minutes"] = (
                 f"depths.{name}.timeout_minutes must be a positive number"
             )
