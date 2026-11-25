@@ -50,18 +50,21 @@ class Attachment:
 
 
 def sanitise_name(name: str) -> str:
-    """A safe file name: no folders, no control or shell-special characters, never empty."""
+    """A safe file name: no folders, no control or shell-special characters, never empty.
+
+    The extension is split off first, so a stem that is all non-ASCII keeps it. Both parts are
+    stripped of spaces and dots again after truncating, because Windows drops those silently.
+    """
     base = name.replace(chr(92), "/").split("/")[-1]
-    base = re.sub(r"[^\w.\- ]", "_", base, flags=re.ASCII)
-    base = re.sub(r"[ _]{2,}", "_", base).strip(" ._")
-    if "." in base:
-        stem, _, ext = base.rpartition(".")
-        ext = ext[:10]
-    else:
+    base = re.sub(r"[^\w.\- ]", "_", base, flags=re.ASCII).strip(" .")
+    stem, dot, ext = base.rpartition(".")
+    if not dot:
         stem, ext = base, ""
-    stem = stem.strip(" ._")[: _MAX_NAME - len(ext) - 1]
-    if not stem or stem.lower() in _RESERVED:
-        stem = f"attachment-{stem}" if stem else "attachment"
+    ext = ext[:10].strip(" .")
+    stem = re.sub(r"[ _]{2,}", "_", stem).strip(" ._")
+    stem = stem[: _MAX_NAME - len(ext) - 1].strip(" .") or "file"
+    if stem.split(".")[0].lower() in _RESERVED:
+        stem = f"attachment-{stem}"
     return f"{stem}.{ext}" if ext else stem
 
 
@@ -84,6 +87,12 @@ def check_attachments(sources: Iterable[AttachmentSource], max_bytes: int) -> No
                 raise AttachmentError(f"attachment not found: {source}")
             if not source.is_file():
                 raise AttachmentError(f"attachment is not a file: {source}")
+        if isinstance(source, Path):
+            try:
+                with source.open("rb"):
+                    pass
+            except OSError as exc:
+                raise AttachmentError(f"cannot read attachment {source}: {exc}") from exc
         size = _size(source)
         if size > max_bytes:
             raise AttachmentError(
@@ -118,12 +127,16 @@ def store_attachments(
     taken: set[str] = set()
     stored: list[Attachment] = []
     for source in sources:
-        name = _unique(sanitise_name(_source_name(source)), taken)
+        label = _source_name(source)
+        name = _unique(sanitise_name(label), taken)
         destination = target / name
-        if isinstance(source, Upload):
-            destination.write_bytes(source.content)
-        else:
-            shutil.copyfile(source, destination)
+        try:
+            if isinstance(source, Upload):
+                destination.write_bytes(source.content)
+            else:
+                shutil.copyfile(source, destination)
+        except OSError as exc:
+            raise AttachmentError(f"cannot copy attachment {label}: {exc}") from exc
         stored.append(
             Attachment(
                 name, destination.stat().st_size, destination.suffix.lower() in IMAGE_SUFFIXES

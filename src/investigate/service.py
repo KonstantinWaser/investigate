@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import traceback
 import uuid
 from collections.abc import Sequence
@@ -100,7 +101,11 @@ def execute_run(
     run_id = folder.name
     created = now.isoformat(timespec="seconds")
     (folder / "item.md").write_text(item, encoding="utf-8")
-    stored = tuple(store_attachments(folder, attachments, max_bytes))
+    try:
+        stored = tuple(store_attachments(folder, attachments, max_bytes))
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)  # no half-made run folder
+        raise
     session_id = str(uuid.uuid4())
 
     def entry(status: str, title: str, sid: str | None) -> history.HistoryEntry:

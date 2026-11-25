@@ -33,7 +33,7 @@ def test_sanitise_name():
         == "my file_1.PDF"
     )
     assert sanitise_name("a<b>|c?.png") == "a_b_c.png"
-    assert sanitise_name("...") == "attachment"
+    assert sanitise_name("a b") == "a b"
     assert sanitise_name("CON.txt") == "attachment-CON.txt"
     assert sanitise_name("Ünï.md") == "n.md"
     assert len(sanitise_name("x" * 500 + ".pdf")) <= 100
@@ -152,3 +152,56 @@ def test_cli_errors(home, tmp_path, capsys):
     assert "--attach" in capsys.readouterr().err
     assert main(["run", "x", "--attach", str(tmp_path / "gone.pdf")], runner=FakeRunner()) == 2
     assert "not found" in capsys.readouterr().err
+
+
+def test_sanitise_keeps_extension_of_non_ascii_stem():
+    assert sanitise_name("Ü.png") == "file.png"
+    assert sanitise_name("日本.pdf") == "file.pdf"
+    assert sanitise_name("...") == "file"
+
+
+def test_sanitise_reserved_name_before_first_dot():
+    assert sanitise_name("nul.tar.gz") == "attachment-nul.tar.gz"
+    assert sanitise_name("com1.txt") == "attachment-com1.txt"
+
+
+def test_truncation_never_leaves_trailing_space_or_dot(tmp_path):
+    assert sanitise_name("a.abcdefghi jkl") == "a.abcdefghi"
+    assert not sanitise_name("x" * 98 + " y.pdf").split(".")[0].endswith(" ")
+    folder = tmp_path / "run"
+    folder.mkdir()
+    stored = store_attachments(
+        folder, [Upload("a.abcdefghi jkl", b"one"), Upload("a.abcdefghi", b"two")], 1000
+    )
+    assert [s.name for s in stored] == ["a.abcdefghi", "a-2.abcdefghi"]
+    contents = sorted(p.read_bytes() for p in (folder / "attachments").iterdir())
+    assert contents == [b"one", b"two"]
+
+
+def test_unreadable_source_is_rejected_up_front(tmp_path, monkeypatch):
+    locked = _file(tmp_path, "locked.pdf")
+    real_open = type(locked).open
+
+    def deny(self, *args, **kwargs):
+        if self == locked:
+            raise PermissionError("denied")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(locked), "open", deny)
+    folder = tmp_path / "run"
+    folder.mkdir()
+    with pytest.raises(AttachmentError, match="cannot read.*locked.pdf"):
+        store_attachments(folder, [locked], 1000)
+
+
+def test_copy_failure_fails_cleanly_and_leaves_no_run_folder(home, tmp_path, monkeypatch):
+    src = _file(tmp_path, "a.pdf")
+
+    def boom(*args, **kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr("investigate.attachments.shutil.copyfile", boom)
+    with pytest.raises(AttachmentError, match="a.pdf"):
+        execute_run("t", Depth.QUICK, home=home, runner=FakeRunner(), attachments=[src])
+    assert list((home / "runs").iterdir()) == []
+    assert main(["run", "t", "--attach", str(src)], runner=FakeRunner()) == 2
