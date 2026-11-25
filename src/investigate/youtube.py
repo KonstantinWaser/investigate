@@ -168,7 +168,9 @@ class YtDlpClient:
         return refs
 
     def video(self, video_id: str) -> VideoInfo:
-        with self._ydl() as ydl:
+        # A premiere or scheduled stream has no formats yet; without this flag yt-dlp raises
+        # before `live_status` can be read, and the video would count as unfetchable.
+        with self._ydl(ignore_no_formats_error=True) as ydl:
             info = ydl.extract_info(_watch_url(video_id), download=False)
         return VideoInfo(
             id=video_id,
@@ -275,8 +277,9 @@ class YouTubeSource:
         """Metadata, then a transcript from subtitles, else from audio, else none (with a note).
 
         A live or upcoming video is skipped (`ItemSkipped`) and looked at again at the next check.
-        A video over the duration limit gets no transcript, only a note. Only a failure to read the
-        video itself raises; a missing transcript never does.
+        A video over the duration limit still uses its subtitles but is never downloaded and
+        transcribed. Only a failure to read the video itself raises; a missing transcript never
+        does.
         """
         info = self._client.video(ref.id)
         self._sleep(self._pause)  # be gentle with YouTube between requests
@@ -284,15 +287,7 @@ class YouTubeSource:
             what = info.live_status.removeprefix("is_").replace("_", " ")
             raise ItemSkipped(f"{what}; it is checked once it has ended")
         notes: list[str] = []
-        if self._max_duration and info.duration and info.duration > self._max_duration:
-            notes.append(
-                f"No transcript: the video ({_duration(info.duration)}) is longer than the limit "
-                f"of {self._max_duration // 60} minutes. This Fact-check ran on the title and "
-                "description only."
-            )
-            transcript, how = "", ""
-        else:
-            transcript, how = self._transcript(info, notes)
+        transcript, how = self._transcript(info, notes)
         if transcript:
             line = f"Transcript: attached as transcript.txt ({how})."
             attachments = (Upload("transcript.txt", transcript.encode("utf-8")),)
@@ -310,6 +305,13 @@ class YouTubeSource:
                 notes.append("The subtitle track was empty.")
             except Exception as exc:  # fall back to audio: YouTube often rate-limits subtitles
                 notes.append(f"Subtitles could not be fetched ({_one_line(str(exc))[:200]}).")
+        if self._max_duration and info.duration and info.duration > self._max_duration:
+            notes.append(
+                f"No transcript: the video ({_duration(info.duration)}) is longer than the limit "
+                f"of {self._max_duration // 60} minutes for audio transcription and has no usable "
+                "subtitles. This Fact-check ran on the title and description only."
+            )
+            return "", ""
         reason = self._transcriber.unavailable()
         if reason:
             notes.append(

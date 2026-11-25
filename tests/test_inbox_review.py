@@ -469,3 +469,46 @@ def test_a_missing_cookie_file_is_an_error_not_a_silent_anonymous_check(fake_ytd
     client = YtDlpClient("https://www.youtube.com/playlist?list=PLabc", tmp_path / "nope.txt")
     with pytest.raises(OSError):
         client.playlist()
+
+
+# third review: upcoming videos through the real client, subtitles past the duration cap
+
+
+class UpcomingYoutubeDL(FakeYoutubeDL):
+    """Like yt-dlp on a premiere: no formats yet, which raises unless told to ignore it."""
+
+    def extract_info(self, url, download=False):
+        if not self.options.get("ignore_no_formats_error"):
+            raise RuntimeError("This live event will begin in 3 days")
+        return {"id": "abc", "title": "Premiere", "live_status": "is_upcoming"}
+
+
+def test_an_upcoming_premiere_is_skipped_not_failed(monkeypatch):
+    module = types.ModuleType("yt_dlp")
+    module.YoutubeDL = UpcomingYoutubeDL
+    monkeypatch.setitem(sys.modules, "yt_dlp", module)
+    client = YtDlpClient("https://www.youtube.com/playlist?list=PLabc")
+    source = YouTubeSource(client, FakeTranscriber(), pause_seconds=0)
+    with pytest.raises(ItemSkipped):
+        source.fetch(InboxRef("abc", "Premiere"))
+
+
+def test_a_long_video_with_subtitles_keeps_its_transcript_but_gets_no_audio():
+    info = VideoInfo("v1", "Long talk", "u", duration=7200, subtitle_lang="en")
+    client = FakeYouTube({"v1": info})
+    transcriber = FakeTranscriber()
+    source = YouTubeSource(client, transcriber, pause_seconds=0, max_duration_seconds=5400)
+    item = source.fetch(InboxRef("v1", "Long talk"))
+    assert [a.name for a in item.attachments] == ["transcript.txt"]
+    assert "subtitles, en" in item.text and transcriber.transcribed == []
+
+
+def test_a_long_video_whose_subtitles_fail_does_not_fall_back_to_audio():
+    info = VideoInfo("v1", "Long talk", "u", duration=7200, subtitle_lang="en")
+    client = FakeYouTube({"v1": info}, subtitle_error=RuntimeError("429"))
+    transcriber = FakeTranscriber()
+    source = YouTubeSource(client, transcriber, pause_seconds=0, max_duration_seconds=5400)
+    item = source.fetch(InboxRef("v1", "Long talk"))
+    assert item.attachments == () and transcriber.transcribed == []
+    assert "audio" not in [c[0] for c in client.calls]
+    assert any("longer than the limit" in n for n in item.notes)

@@ -39,7 +39,7 @@ Tests use a fake runner and an `INVESTIGATE_HOME` pointing at a temp folder. The
 
 ## Rules
 
-- Run folder layout: `item.md`, `result.md` (as the agent wrote it), `result.json` (parsed, only when valid), `report.html`, `agent.log`, `run.json`, `mcp.json`, and `attachments/` when the Item has files, and after Follow-ups `followups.json` and `followup-N.md`.
+- Run folder layout: `item.md`, `result.md` (as the agent wrote it), `result.json` (parsed, only when valid), `report.html`, `agent.log`, `run.json`, `mcp.json`, and `attachments/` when the Item has files, and after Follow-ups `followups.json` and `followup-N.md`. An Inbox Fact-check with notes (a missing transcript, say) also gets `notes.json`, written when the Run is reserved so the notes survive a Run that never starts; the same notes go into `run.json` and the Report once it runs.
 - The structured result schema is versioned in `result.py` (`SCHEMA_VERSION`). Extend it additively.
 - Allowlist mode (`runner.py`) allows WebSearch, WebFetch, the `Agent` subagent tool (deep Runs fan out per source class), an `Edit(//<run folder>/**)` rule (Edit covers the Write tool; a `Write(...)` rule did not match when tried), and Read of each Context file by exact path. It does not use `--add-dir`. Every Run also passes `--settings '{"disableAllHooks": true}'`.
 - Nothing personal goes into the repo: no names, user paths or Context content.
