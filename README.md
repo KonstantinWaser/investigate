@@ -2,7 +2,7 @@
 
 A personal research desk. You paste text, links, files or images (or save an Instagram Collection or a YouTube playlist), an agent CLI researches or fact-checks it in depth, and you get a cited HTML Report that relates the findings to your own projects.
 
-Runs happen on your machine through the Claude Code CLI. It has no server of its own: the only traffic is from the CLI and the agent (model calls, web search and fetch), plus the Inbox sources you configure (yt-dlp for YouTube, the browser profile for Instagram). MIT licensed. The vocabulary (Item, Run, Report, Depth, Context, Inbox, Verdict) is in `GLOSSARY.md`, the agreed design in `docs/design.md`, what exists elsewhere in `docs/prior-art.md`, and how to add another agent CLI in `docs/runner.md`.
+Runs happen on your machine through the Claude Code CLI. It has no server of its own. Traffic comes from the CLI and the agent (model calls, web search and fetch), the Inbox sources you configure (yt-dlp for YouTube, the browser profile for Instagram), and first-use downloads: the Playwright MCP package through npx and the Whisper model from Hugging Face. MIT licensed. The vocabulary (Item, Run, Report, Depth, Context, Inbox, Verdict) is in `GLOSSARY.md`, the agreed design in `docs/design.md`, what exists elsewhere in `docs/prior-art.md`, and how to add another agent CLI in `docs/runner.md`.
 
 ## Contents
 
