@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from investigate import browser
-from investigate.instance import InstanceLock, running_url
+from investigate.instance import InstanceLock, recover_interrupted, running_url
 from investigate.runner import Runner
 from investigate.server import DEFAULT_PORT, FinishedRun, HistoryServer
 
@@ -233,6 +233,7 @@ def run_tray(
         except (ValueError, OSError) as exc:  # bad config, or the port is taken
             print(f"error: {exc}", file=sys.stderr)
             return 2
+        recover_interrupted(home)
         lock.publish(app.server.url)
         print(f"Tray running; History at {app.server.url}", flush=True)
         gui(app)

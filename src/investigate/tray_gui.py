@@ -57,7 +57,14 @@ class _ToastNotifier(Notifier):
 
 
 def run(app: TrayApp) -> None:
-    """Show the icon and block until Quit (or Ctrl+C / SIGTERM)."""
+    """Show the icon and block until Quit (or Ctrl+C / SIGTERM).
+
+    Known macOS limits, untested here and not fixable cleanly through pystray: `watch` below sets
+    the icon and title from a worker thread, which AppKit wants on the main thread (pystray has
+    no call to marshal onto it), and pystray installs its own SIGINT handler that terminates
+    NSApp directly, so Ctrl+C there skips `run_tray`'s shutdown. Quit from the menu is the
+    supported way to leave on macOS.
+    """
     import pystray
 
     def entry(item):

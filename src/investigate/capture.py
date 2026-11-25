@@ -7,6 +7,9 @@ Nothing from any Run is put into this page.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+
 from investigate.webpages import _CSS
 
 _CSS_EXTRA = """\
@@ -52,15 +55,30 @@ box.addEventListener('paste', e => {
   const files = [...(e.clipboardData ? e.clipboardData.files : [])];
   if (files.length) { e.preventDefault(); add(files); }
 });
-for (const t of [window, box]) {
-  t.addEventListener('dragover', e => { e.preventDefault(); box.classList.add('over'); });
-  t.addEventListener('dragleave', () => box.classList.remove('over'));
-  t.addEventListener('drop', e => {
-    e.preventDefault(); box.classList.remove('over');
-    if (e.dataTransfer && e.dataTransfer.files.length) add([...e.dataTransfer.files]);
-  });
-}
+// One set of drag handlers, on the window only: a drop on the box bubbles up to it, so a second
+// registration on the box would attach every file twice.
+window.addEventListener('dragover', e => { e.preventDefault(); box.classList.add('over'); });
+window.addEventListener('dragleave', () => box.classList.remove('over'));
+window.addEventListener('drop', e => {
+  box.classList.remove('over');
+  const data = e.dataTransfer;
+  if (!data) return;
+  if (data.files && data.files.length) {
+    e.preventDefault();
+    add([...data.files]);
+    return;
+  }
+  // A dragged link or text goes into the box. Anything else is left to the browser.
+  const nl = String.fromCharCode(10);
+  const text = (data.getData('text/uri-list') || data.getData('text/plain'))
+    .split(nl).filter(l => l.trim() && !l.startsWith('#')).join(nl);
+  if (text) {
+    e.preventDefault();
+    box.value += (box.value && !box.value.endsWith(nl) ? nl : '') + text;
+  }
+});
 async function submit() {
+  if (go.disabled) return;  // a submit is already in flight
   const form = new FormData();
   form.append('text', box.value);
   form.append('depth', document.getElementById('depth').value);
@@ -83,6 +101,19 @@ document.addEventListener('keydown', e => {
 });
 box.focus();
 """
+
+
+def _hash(text: str) -> str:
+    return "'sha256-" + base64.b64encode(hashlib.sha256(text.encode()).digest()).decode() + "'"
+
+
+def capture_csp() -> str:
+    """Allows exactly this page's script and style, posting to ourselves, and no framing."""
+    return (
+        f"default-src 'none'; script-src {_hash(_JS)}; style-src {_hash(_CSS + _CSS_EXTRA)}; "
+        "connect-src 'self'; img-src blob:; form-action 'self'; frame-ancestors 'none'; "
+        "base-uri 'none'"
+    )
 
 
 def capture_page() -> str:

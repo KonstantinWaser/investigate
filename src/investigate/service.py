@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import traceback
@@ -175,6 +176,8 @@ def _execute_run(
     def entry(status: str, title: str, sid: str | None) -> history.HistoryEntry:
         return history.HistoryEntry(run_id, KIND, depth.value, status, title, created, sid)
 
+    # Recovery after a hard kill tells a dead Run from a live one by this pid.
+    (folder / "running.pid").write_text(str(os.getpid()), encoding="utf-8")
     history.upsert(home, entry("running", _item_title(label), session_id))
     started.append(run_id)
 

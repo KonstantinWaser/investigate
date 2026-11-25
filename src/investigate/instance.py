@@ -10,9 +10,13 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
+import sys
 from pathlib import Path
 
+from investigate import history
 from investigate.profile_lock import _try_lock, _unlock
+from investigate.service import fail_run
 
 LOCK_NAME = "tray.lock"
 INFO_NAME = "tray.json"
@@ -57,3 +61,51 @@ def running_url(home: Path) -> str | None:
     except (OSError, ValueError, AttributeError):
         return None
     return url if isinstance(url, str) else None
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel = ctypes.windll.kernel32
+        handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            ok = kernel.GetExitCodeProcess(handle, ctypes.byref(code))
+            return bool(ok) and code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # exists, owned by someone else
+    return True
+
+
+def _run_alive(home: Path, run_id: str) -> bool:
+    try:
+        pid = int((home / "runs" / run_id / "running.pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    return _pid_alive(pid)
+
+
+def recover_interrupted(home: Path) -> list[str]:
+    """Mark Runs left `queued` or `running` by a hard kill (Task Manager, logoff, shutdown) as
+    failed. Call it only while holding the instance lock: no host can still be working on a
+    queued Run, and a running one is spared only when a live process (an `investigate run` in
+    another terminal) wrote its pid. Returns the ids it fixed."""
+    fixed = []
+    for entry in history.load_entries(home):
+        if entry.status == "queued" or (
+            entry.status == "running" and not _run_alive(home, entry.id)
+        ):
+            fail_run(home, entry.id, "Interrupted: the app stopped before this Run finished.")
+            fixed.append(entry.id)
+    return fixed

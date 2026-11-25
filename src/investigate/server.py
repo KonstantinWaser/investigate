@@ -31,7 +31,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from investigate import history
 from investigate.attachments import AttachmentError, Upload, check_attachments
-from investigate.capture import capture_page
+from investigate.capture import capture_csp, capture_page
 from investigate.config import ConfigError, Depth, load_config
 from investigate.runner import Runner
 from investigate.runqueue import QueueClosed, RunQueue
@@ -166,6 +166,8 @@ class HistoryServer:
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._interrupted = threading.Event()
+        self.shutdown_grace = 10.0  # seconds a running Run gets when `serve_forever` ends
         self._active: set[str] = set()  # queued or running here: cannot be deleted
         # The parallel limit comes from config.toml unless given; it is read once at start-up.
         limit = max_parallel if max_parallel is not None else load_config(home).parallel_runs
@@ -209,15 +211,20 @@ class HistoryServer:
         self._httpd = self._thread = None
 
     def serve_forever(self) -> None:
-        """Start and block until interrupted (the `investigate serve` command)."""
+        """Start and block until interrupted (the `investigate serve` command), then shut down
+        like the tray's Quit: queued Runs are marked failed, running ones get the grace period."""
         self.start()
         try:
-            while self._thread and self._thread.is_alive():
-                self._thread.join(timeout=0.5)
+            while not self._interrupted.wait(0.5) and self._thread and self._thread.is_alive():
+                pass
         except KeyboardInterrupt:
             pass
         finally:
-            self.stop()
+            self.shutdown(self.shutdown_grace)
+
+    def interrupt(self) -> None:
+        """End `serve_forever` (what Ctrl+C does)."""
+        self._interrupted.set()
 
     @property
     def url(self) -> str:
@@ -468,10 +475,20 @@ class _Handler(BaseHTTPRequestHandler):
             page = history_page(
                 apply_filters(entries, filters), filters, self.app.active_ids(), len(entries)
             )
-            self._send(HTTPStatus.OK, page.encode(), "text/html; charset=utf-8")
+            self._send(
+                HTTPStatus.OK,
+                page.encode(),
+                "text/html; charset=utf-8",
+                {"Content-Security-Policy": "frame-ancestors 'none'"},
+            )
             return
         if url.path == "/capture":
-            self._send(HTTPStatus.OK, capture_page().encode(), "text/html; charset=utf-8")
+            self._send(
+                HTTPStatus.OK,
+                capture_page().encode(),
+                "text/html; charset=utf-8",
+                {"Content-Security-Policy": capture_csp()},
+            )
             return
         match = re.fullmatch(r"/runs/([^/]+)(?:/(.*))?", url.path)
         if not match:
@@ -487,7 +504,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         data = file.read_bytes()
         if rel in ("", "report.html"):
-            policy = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'"
+            policy = (
+                "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; "
+                "frame-ancestors 'none'"
+            )
             self._send(
                 HTTPStatus.OK,
                 data,
