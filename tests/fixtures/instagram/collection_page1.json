@@ -1,0 +1,29 @@
+{
+  "items": [
+    {"media": {
+      "code": "REEL000001", "pk": "1001", "media_type": 2, "product_type": "clips",
+      "taken_at": 1767225600,
+      "user": {"username": "examplecreator"},
+      "caption": {"text": "Honey never spoils, they found 3000 year old jars!\n#facts"},
+      "video_duration": 21.4,
+      "video_versions": [
+        {"url": "https://cdn.example.test/reel1_hd.mp4", "width": 720, "height": 1280},
+        {"url": "https://cdn.example.test/reel1_sd.mp4", "width": 360, "height": 640}
+      ],
+      "image_versions2": {"candidates": [{"url": "https://cdn.example.test/reel1.jpg", "width": 720, "height": 1280}]}
+    }},
+    {"media": {
+      "code": "POST000002", "pk": "1002", "media_type": 1, "product_type": "feed",
+      "taken_at": 1767139200,
+      "user": {"username": "otherperson"},
+      "caption": null,
+      "image_versions2": {"candidates": [
+        {"url": "https://cdn.example.test/post2_small.jpg", "width": 320, "height": 320},
+        {"url": "https://cdn.example.test/post2_big.jpg", "width": 1080, "height": 1080}
+      ]}
+    }}
+  ],
+  "more_available": true,
+  "next_max_id": "cursor-2",
+  "status": "ok"
+}

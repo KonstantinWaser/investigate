@@ -1,0 +1,9 @@
+{
+  "items": [
+    {"collection_id": "9001", "collection_name": "All posts", "collection_type": "ALL_MEDIA_AUTO_COLLECTION"},
+    {"collection_id": "9002", "collection_name": "To Check", "collection_type": "MEDIA"},
+    {"collection_id": "9003", "collection_name": "Recipes", "collection_type": "MEDIA"}
+  ],
+  "more_available": false,
+  "status": "ok"
+}

@@ -55,3 +55,19 @@ The transcript comes from the video's subtitles. Without subtitles the audio is 
 A Verdict the agent words differently is mapped (`partly-true`, `mostly true` and `misleading` to Partly true; `false` and `incorrect` to Wrong; `true` and `accurate` to Confirmed; `out of date` to Outdated; `unknown` to Unverified; the full table is `VERDICT_ALIASES` in `result.py`). Any other word becomes Unverified and the Report says so.
 
 The tray runs the check at the `check_times`, once at start-up when a slot was missed while it was off, and on "Check inbox now" in its menu; a toast sums up the new Fact-checks. When the playlist cannot be reached the tray retries after 10, 20, then 40 minutes (never later than the next slot) and toasts the outage once, again if the error changes, and when it is over; "Check inbox now" always answers. Fact-checks wait in the same queue as every other Run (`parallel_runs`). `investigate inbox` does one check from the command line and waits for the Fact-checks to finish. Only one check runs at a time.
+
+## Inbox: Fact-checks of an Instagram Collection
+
+Save reels and posts into a private Collection. `investigate inbox` (and the tray's timer) also reads that Collection through the logged-in browser profile, and each reel, post or carousel it has not seen becomes a Fact-check through the same pipeline as YouTube: the caption, the reel's audio transcribed locally, the images (or a few frames of a silent reel, for on-screen text), then claims, Verdicts, Citations and the Relevance to each Context. A post with no factual claim gets a short Report that says so. Nothing is changed on Instagram: only read requests are made, never an unsave, like, follow or comment. Processed shortcodes are kept in `inbox/instagram.json`, so running it again does nothing new.
+
+```toml
+[inbox.instagram]
+collection = "To Check"        # the Collection's name; case and spacing are ignored
+max_duration_minutes = 10      # longer reels are never transcribed from audio (optional)
+```
+
+Instagram has no official API for saved Collections and yt-dlp cannot read them, so the browser profile is the only route: run `investigate login` once and sign in to Instagram, and install the extra that drives it (`uv sync --extra instagram`, then Chrome must be installed). The check asks Instagram's own web endpoints through that profile and holds the profile lock while it does. Using automated access may go against Instagram's terms; you accept that risk. The endpoints are not a public API and may change.
+
+The reel's audio needs ffmpeg and the `transcribe` extra, as for YouTube. Without them the reel is checked on its caption and frames, and the Report says so.
+
+Logged out of Instagram (or never logged in): the check reports it, the tray toasts it once (again when the message changes, and once on recovery), the History page shows a notice, and the YouTube source runs as usual. When the profile is busy (a deep Run, `investigate login`, or an open Chrome window on it) the Instagram part of that check is skipped without counting an attempt and the tray retries it soon.
