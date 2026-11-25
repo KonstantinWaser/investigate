@@ -115,8 +115,9 @@ def _inbox(
         return 2
     if not inbox.configured:
         print(
-            "error: no playlist set. In config.toml add a [inbox.youtube] table with "
-            'playlist = "PLxxxxxxxxxxxx" (a playlist id or URL).',
+            "error: no inbox set. In config.toml add an [inbox.youtube] table with "
+            'playlist = "PLxxxxxxxxxxxx" (a playlist id or URL), or an [inbox.instagram] '
+            'table with collection = "Name" (a saved Collection).',
             file=sys.stderr,
         )
         return 2
@@ -131,8 +132,10 @@ def _inbox(
         return 1
     for created in result.created:
         print(f"queued Fact-check: {created.title}")
-    for error in result.errors:
+    for error in result.errors + result.login_required:
         print(f"error: {error}", file=sys.stderr)
+    for skipped in result.source_busy:
+        print(f"skipped, will be retried: {skipped}")
     print(
         f"{len(result.created)} new, {result.already_processed} already checked."
         + (" Waiting for the Fact-checks to finish." if result.created else "")
@@ -147,13 +150,13 @@ def _inbox(
         entry = done.get(created.run_id)
         print(f"{entry.status if entry else 'unknown'}: {created.title}")
         print(f"Report: {home / 'runs' / created.run_id / 'report.html'}")
-    return 1 if result.errors else 0
+    return 1 if result.errors or result.login_required else 0
 
 
 def main(
     argv: Sequence[str] | None = None,
     runner: Runner | None = None,
-    inbox_sources: Callable[[InboxConfig], list[InboxSource]] = default_sources,
+    inbox_sources: Callable[[InboxConfig], list[InboxSource]] | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
     home = data_home()
@@ -163,7 +166,11 @@ def main(
         return 0
 
     if args.command == "inbox":
-        return _inbox(home, runner or ClaudeCodeRunner(), inbox_sources)
+        return _inbox(
+            home,
+            runner or ClaudeCodeRunner(),
+            inbox_sources or (lambda config: default_sources(config, home)),
+        )
     if args.command == "login":
         return browser.login(home)
     if args.command == "tray":

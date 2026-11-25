@@ -136,7 +136,7 @@ class TrayApp:
         hotkeys: HotkeyBackend | None = None,
         autostart: Autostart | None = None,
         get_startup_command: Callable[[], list[str]] | None = None,
-        inbox_sources: Callable[[InboxConfig], list[InboxSource]] = default_sources,
+        inbox_sources: Callable[[InboxConfig], list[InboxSource]] | None = None,
         clock: Callable[[], datetime] | None = None,
         inbox_poll_seconds: float = 30.0,
     ) -> None:
@@ -155,7 +155,7 @@ class TrayApp:
             on_finished=self._on_finished,
             on_config_changed=self.apply_config,
         )
-        self._inbox_sources = inbox_sources
+        self._inbox_sources = inbox_sources or (lambda config: default_sources(config, home))
         self._clock, self._inbox_poll = clock, inbox_poll_seconds
         self.inbox: InboxScheduler | None = None
         self._inbox_problem: str | None = None  # the outage last toasted, to toast it once
@@ -304,7 +304,7 @@ class TrayApp:
             return True  # retrying cannot fix a config file
         if not config.configured:
             if manual:
-                msg = "Set [inbox.youtube] playlist in config.toml first."
+                msg = "Set an [inbox.youtube] playlist or [inbox.instagram] collection first."
                 self._tell(Toast("Inbox not set up", msg, self.server.url))
             return True
         result = check_inbox(
@@ -325,22 +325,35 @@ class TrayApp:
             return True
         # An outage is toasted once, again when the error changes, and when it is over. A manual
         # check always answers.
-        problem = result.errors[0] if result.errors else None
-        recovered = problem is None and self._inbox_problem is not None
+        # A logged-out source is an outage of that source only; the others have already run.
+        # Every outage is shown, whether or not items were created in the same check.
+        busy = bool(result.source_busy)
+        problems = result.login_required + result.errors
+        problem = " | ".join(problems) if problems else None
+        outage = result.unreachable or bool(result.login_required)
+        # A busy skip observed nothing about that source: it is neither news nor a recovery.
+        recovered = problem is None and self._inbox_problem is not None and not busy
+        retry = result.unreachable or busy
+        changed = problem != self._inbox_problem
+        announce = bool(problem) and (manual or outage) and (manual or changed)
         if result.created:
             self._tell(Toast(*inbox_toast(result.created), history_url))
-        elif problem and (manual or result.unreachable):
-            if manual or problem != self._inbox_problem:
-                self._tell(Toast("Inbox check had problems", toast_text(problem), history_url))
-        elif recovered and not manual:
-            self._tell(Toast("Inbox", "The inbox is reachable again.", history_url))
-        elif manual:
-            self._tell(Toast("Inbox", "Nothing new in the inbox.", history_url))
+        if announce:
+            text = toast_text(problem or "")
+            self._tell(Toast("Inbox check had problems", text, history_url))
+        elif not result.created and not problem:
+            if recovered and not manual:
+                self._tell(Toast("Inbox", "The inbox is reachable again.", history_url))
+            elif manual and not busy:
+                self._tell(Toast("Inbox", "Nothing new in the inbox.", history_url))
+        if manual and busy:
+            note = "Skipped, the browser profile is in use. Retrying soon."
+            self._tell(Toast("Inbox", toast_text(f"{result.source_busy[0]}. {note}"), history_url))
         for message in result.gave_up:
             self._tell(Toast("Inbox gave up on an item", toast_text(message), history_url))
-        if problem is None or result.unreachable:
+        if (problem is None and not busy) or outage:
             self._inbox_problem = problem
-        return not result.unreachable
+        return not retry
 
     def on_login(self) -> None:
         """Opens the logged-in browser on its own thread: `login` blocks until Chrome closes."""

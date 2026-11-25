@@ -1,0 +1,21 @@
+{
+  "items": [
+    {"media": {
+      "code": "CARO000003", "pk": "1003", "media_type": 8, "product_type": "carousel_container",
+      "taken_at": 1767052800,
+      "user": {"username": "examplecreator"},
+      "caption": {"text": "5 vitamins you must take"},
+      "carousel_media": [
+        {"media_type": 1, "image_versions2": {"candidates": [{"url": "https://cdn.example.test/car3_1.jpg", "width": 1080, "height": 1350}]}},
+        {"media_type": 2, "video_duration": 8.0,
+         "video_versions": [{"url": "https://cdn.example.test/car3_2.mp4", "width": 720, "height": 900}],
+         "image_versions2": {"candidates": [{"url": "https://cdn.example.test/car3_2.jpg", "width": 720, "height": 900}]}},
+        {"media_type": 1, "image_versions2": {"candidates": [{"url": "https://cdn.example.test/car3_3.jpg", "width": 1080, "height": 1350}]}}
+      ]
+    }},
+    {"ad": "not a media item"},
+    {"media": {"pk": "1004", "media_type": 1}}
+  ],
+  "more_available": false,
+  "status": "ok"
+}

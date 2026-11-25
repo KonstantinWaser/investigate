@@ -34,6 +34,8 @@ DEFAULT_MAX_ATTEMPTS = 3  # tries per item (a fetch, or a failed Run) before giv
 DEFAULT_MAX_NEW = 10  # new items taken per check; the rest wait for the next one
 DEFAULT_MAX_DURATION_MINUTES = 90  # longer videos are checked on title and description
 LOG_NAME = "inbox.log"
+NOTICES_NAME = "notices.json"
+DEFAULT_INSTAGRAM_MAX_MINUTES = 10  # longer reels are checked on caption and frames
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,16 @@ class InboxItem:
 class ItemSkipped(Exception):  # noqa: N818
     """An item that is not ready yet (a live stream, say). It is not an error and not counted
     as a failed attempt; the next check looks at it again."""
+
+
+class LoginRequired(Exception):  # noqa: N818
+    """A source is logged out. An outage of that source only: it is reported and shown as a
+    History notice, and the other sources still run."""
+
+
+class SourceBusy(Exception):  # noqa: N818
+    """A source cannot be read right now (the browser profile is in use). It is skipped without
+    counting an attempt and the check is retried later."""
 
 
 class InboxSource(Protocol):
@@ -92,10 +104,12 @@ class InboxResult:
     skipped: list[str] = field(default_factory=list)  # not ready yet, looked at again later
     gave_up: list[str] = field(default_factory=list)  # out of attempts, said once
     deferred: int = 0  # items left for the next check by the per-check cap
+    login_required: list[str] = field(default_factory=list)  # logged-out sources
+    source_busy: list[str] = field(default_factory=list)  # skipped, to be retried
 
     @property
     def ok(self) -> bool:
-        return not self.errors and not self.busy
+        return not (self.errors or self.busy or self.login_required)
 
 
 # configuration
@@ -111,10 +125,12 @@ class InboxConfig:
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
     max_new_per_check: int = DEFAULT_MAX_NEW
     max_duration_minutes: int = DEFAULT_MAX_DURATION_MINUTES
+    instagram_collection: str | None = None  # name of the saved Collection, None: off
+    instagram_max_duration_minutes: int = DEFAULT_INSTAGRAM_MAX_MINUTES
 
     @property
     def configured(self) -> bool:
-        return self.playlist is not None
+        return self.playlist is not None or self.instagram_collection is not None
 
 
 def _parse_time(value: object, path: Path) -> time:
@@ -183,6 +199,14 @@ def load_inbox_config(home: Path) -> InboxConfig:
         and all(isinstance(lang, str) and lang.strip() for lang in languages)
     ):
         raise ConfigError(f"{path}: inbox.youtube.subtitle_languages must be a list like ['en']")
+    instagram = section.get("instagram", {})
+    if not isinstance(instagram, dict):
+        raise ConfigError(f"{path}: inbox.instagram must be a table")
+    collection = instagram.get("collection")
+    if collection is not None:
+        if not isinstance(collection, str) or not collection.strip():
+            raise ConfigError(f"{path}: inbox.instagram.collection must be the Collection's name")
+        collection = collection.strip()
     return InboxConfig(
         check_times,
         depth,
@@ -196,15 +220,35 @@ def load_inbox_config(home: Path) -> InboxConfig:
         max_duration_minutes=_positive_int(
             youtube, "max_duration_minutes", DEFAULT_MAX_DURATION_MINUTES, path, "inbox.youtube"
         ),
+        instagram_collection=collection,
+        instagram_max_duration_minutes=_positive_int(
+            instagram,
+            "max_duration_minutes",
+            DEFAULT_INSTAGRAM_MAX_MINUTES,
+            path,
+            "inbox.instagram",
+        ),
     )
 
 
-def default_sources(config: InboxConfig) -> list[InboxSource]:
+def default_sources(config: InboxConfig, home: Path) -> list[InboxSource]:
     """The sources the config enables. The imports are lazy: yt-dlp loads only when used."""
     from investigate.transcribe import WhisperTranscriber
     from investigate.youtube import YouTubeSource, YtDlpClient
 
     sources: list[InboxSource] = []
+    # Instagram first: it holds the profile lock only while listing, so it is free again
+    # before any Run of this check (which may take the lock) starts.
+    if config.instagram_collection:
+        from investigate.instagram import InstagramSource, browser_reader
+
+        sources.append(
+            InstagramSource(
+                browser_reader(home, config.instagram_collection),
+                transcriber=WhisperTranscriber(),
+                max_duration_seconds=config.instagram_max_duration_minutes * 60,
+            )
+        )
     if config.playlist:
         client = YtDlpClient(config.playlist, config.cookies, config.subtitle_languages)
         limit = config.max_duration_minutes * 60
@@ -296,6 +340,51 @@ class ProcessedIds:
         if isinstance(failing.get(item_id), dict):
             failing[item_id]["gave_up"] = True
             self._save(failing=failing)
+
+
+class Notices:
+    """What the History page shows above the list: one line per source that is in trouble and
+    needs the user (a logged-out Instagram). Set by a check, cleared when the source works."""
+
+    def __init__(self, home: Path) -> None:
+        self._path = _dir(home) / NOTICES_NAME
+
+    def all(self) -> dict[str, str]:
+        data = _read_json(self._path)
+        return {str(k): v for k, v in data.items() if isinstance(v, str)}
+
+    def set(self, source: str, text: str) -> None:
+        current = self.all()
+        if current.get(source) != text:
+            current[source] = text
+            _write_json(self._path, current)
+
+    def clear(self, source: str) -> None:
+        current = self.all()
+        if current.pop(source, None) is not None:
+            _write_json(self._path, current)
+
+
+def configured_source_names(config: InboxConfig) -> set[str]:
+    names = set()
+    if config.playlist:
+        names.add("youtube")
+    if config.instagram_collection:
+        names.add("instagram")
+    return names
+
+
+def active_notices(home: Path) -> dict[str, str]:
+    """The notices of sources that are still configured. A notice of a source that was removed
+    from config.toml is deleted. An unreadable config shows every notice and deletes none."""
+    notices = Notices(home)
+    try:
+        wanted = configured_source_names(load_inbox_config(home))
+    except ConfigError:
+        return notices.all()
+    for source in set(notices.all()) - wanted:
+        notices.clear(source)
+    return notices.all()
 
 
 class InboxState:
@@ -401,12 +490,22 @@ def _check_source(
     budget: list[int],
 ) -> None:
     seen = ProcessedIds(home, source.name)
+    notices = Notices(home)
     try:
         refs = source.list_items()
+    except LoginRequired as exc:
+        message = f"{source.name}: {_brief_text(exc)}"
+        out.login_required.append(message)
+        notices.set(source.name, _brief_text(exc))
+        return
+    except SourceBusy as exc:
+        out.source_busy.append(f"{source.name}: {_brief_text(exc)}")
+        return
     except Exception as exc:
         out.errors.append(f"{source.name}: could not read the list: {_brief(exc)}")
         out.unreachable = True
         return
+    notices.clear(source.name)
     runs = {e.id: e.status for e in history.load_entries(home)}
     for ref in refs:
         label = ref.title or ref.id
@@ -452,6 +551,10 @@ def _check_source(
         seen.add(ref.id, run_id)  # only now: the Run exists
         budget[0] -= 1
         out.created.append(CreatedCheck(source.name, run_id, item.title))
+
+
+def _brief_text(exc: Exception) -> str:
+    return " ".join(str(exc).split())[:300]
 
 
 def _brief(exc: Exception) -> str:

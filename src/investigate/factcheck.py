@@ -14,7 +14,9 @@ INTRO = "You are a fact-checking agent producing one cited Report for the Item b
 
 TASK = """\
 Task. The Item is something the user saved: a video (title, description and a transcript, or a \
-note that no transcript was available). Extract every claim it makes that can be checked against \
+note that no transcript was available) or an Instagram reel, post or carousel (caption, a \
+transcript, and attached image or frame files whose visible text counts as part of what the post \
+claims). Extract every claim it makes that can be checked against \
 evidence: facts, numbers, dates, attributions, health, science, news and how-to claims. Skip \
 opinions, jokes and sales talk. Then give each claim exactly one Verdict:
 - confirmed: sources you read support it as stated.

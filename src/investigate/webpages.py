@@ -39,6 +39,8 @@ th{color:var(--muted);font-weight:600;font-size:.8rem;text-transform:uppercase}
 .empty{padding:2rem;text-align:center;color:var(--muted);background:var(--card);\
 border-radius:.5rem}
 td form{margin:0}
+.notice{padding:.75rem 1rem;border-radius:.5rem;margin:0 0 1rem;background:var(--card);\
+border:1px solid var(--run)}
 """
 
 
@@ -161,8 +163,13 @@ def _row(e: HistoryEntry, active: Collection[str]) -> str:
 
 
 def history_page(
-    entries: Sequence[HistoryEntry], f: Filters, active: Collection[str], total: int
+    entries: Sequence[HistoryEntry],
+    f: Filters,
+    active: Collection[str],
+    total: int,
+    notices: Sequence[str] = (),
 ) -> str:
+    banner = "".join(f'<div class="notice">{escape(str(n))}</div>' for n in notices)
     refresh = (
         '<meta http-equiv="refresh" content="5">'
         if any(e.status in ("running", "queued") for e in entries)
@@ -185,7 +192,7 @@ def history_page(
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f"<title>History</title>{refresh}<style>{_CSS}</style></head><body><main>"
-        "<h1>History</h1>"
+        f"<h1>History</h1>{banner}"
         '<form class="filters" method="get" action="/">'
         '<input type="search" name="q" placeholder="Search titles" '
         f'value="{escape(f.q, quote=True)}">'
