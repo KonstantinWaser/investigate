@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from investigate.prompt import RESULT_FILE
 from investigate.runner import RunnerOutcome, RunRequest
 
@@ -25,6 +27,25 @@ Something was found.
 ```
 """
 
+GOOD_ANSWER = """The follow-up answer body.
+
+```json
+{
+  "schema_version": 1,
+  "title": "Answer",
+  "summary": "A follow-up summary {n}.",
+  "findings": [
+    {
+      "claim": "A follow-up claim {n}.",
+      "detail": "",
+      "confidence": "medium",
+      "citations": [{"title": "Other", "url": "https://example.com/other{n}", "note": ""}]
+    }
+  ]
+}
+```
+"""
+
 
 class FakeRunner:
     """A runner that writes a canned result file, like the agent would, and reports an outcome."""
@@ -41,6 +62,10 @@ class FakeRunner:
         error: str | None = None,
         raises: Exception | None = None,
         session_id: str | None = "fake-session",
+        answer: str | None = GOOD_ANSWER,
+        resume_unavailable: bool = False,
+        resume_ok: bool = True,
+        resume_timed_out: bool = False,
     ) -> None:
         self.result_file = result_file
         self.text = text
@@ -50,6 +75,11 @@ class FakeRunner:
         self.raises = raises
         self.session_id = session_id
         self.requests: list[RunRequest] = []
+        self.answer = answer
+        self.resume_unavailable = resume_unavailable
+        self.resume_ok = resume_ok
+        self.resume_timed_out = resume_timed_out
+        self.resumes: list[RunRequest] = []
 
     def run(self, request: RunRequest) -> RunnerOutcome:
         self.requests.append(request)
@@ -64,4 +94,22 @@ class FakeRunner:
             session_id=self.session_id,
             log="fake log\n" + (f"ERROR: {self.error}\n" if self.error else ""),
             error=self.error,
+        )
+
+    def resume(self, request: RunRequest) -> RunnerOutcome:
+        """Writes the answer file the prompt names, with `{n}` filled in from its number."""
+        self.resumes.append(request)
+        if self.resume_unavailable:
+            return RunnerOutcome(False, False, "", None, "", "No conversation found", True)
+        match = re.search(r"followup-(\d+)\.md", request.prompt)
+        if self.answer is not None and match:
+            text = self.answer.replace("{n}", match.group(1))
+            (request.workdir / match.group(0)).write_text(text, encoding="utf-8")
+        return RunnerOutcome(
+            ok=self.resume_ok,
+            timed_out=self.resume_timed_out,
+            text="done",
+            session_id=request.session_id,
+            log="fake resume log\n",
+            error=None if self.resume_ok else "resume failed",
         )

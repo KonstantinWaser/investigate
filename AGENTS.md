@@ -22,6 +22,7 @@ Tests use a fake runner and an `INVESTIGATE_HOME` pointing at a temp folder. The
 - `src/investigate/profile_lock.py`: the cross-process lock on that profile. Anything that opens the profile holds it.
 - `src/investigate/history.py`: the History index (`index.json` in the data folder). New `HistoryEntry` fields need a default so old indexes keep loading; unknown keys are preserved on rewrite.
 - `src/investigate/server.py`, `webpages.py`: the localhost History and Report server (stdlib `http.server`; `HistoryServer` starts and stops from code; `investigate serve`). Loopback only unless `--allow-remote`; POST and DELETE check Host and Origin.
+- `src/investigate/followup.py`: Follow-ups. Resumes the Run's agent session (`Runner.resume`), stores answers in `followups.json`, mirrors them into `result.json` and renders them into `report.html` between comment markers; one at a time per Run (409 otherwise). A Follow-up is a `RunQueue` job and takes a parallel slot (resuming spawns an agent); its fallback Run is reserved with `reserve_run` (linked by `followup_of` from then on) and runs inside that slot. The in-progress state is in memory only, so a hard kill leaves nothing stuck; `recover_interrupted` fails a half-made fallback Run and keeps its link. Without a session id, or when the resume fails with an unknown session, the question becomes a new Run (`followup_of` links it). The served Report gets its ask box and a meta-refresh progress notice injected at serve time, so the file view stays plain.
 - `src/investigate/service.py`: `execute_run`, the one path that turns an Item into a run folder. `reserve_run` makes the folder and lists the Run as `queued` first. A crash after the Run is listed leaves it `failed`.
 - `src/investigate/runqueue.py`: FIFO queue with the parallel limit (`parallel_runs` in `config.toml`, 1 to 3). `HistoryServer.submit` goes through it, so `serve` and the tray share it.
 - `src/investigate/capture.py`: the quick-capture page (`/capture`). Paste and drop are handled by the page, submit goes to `POST /api/runs`.
@@ -32,7 +33,7 @@ Tests use a fake runner and an `INVESTIGATE_HOME` pointing at a temp folder. The
 
 ## Rules
 
-- Run folder layout: `item.md`, `result.md` (as the agent wrote it), `result.json` (parsed, only when valid), `report.html`, `agent.log`, `run.json`, `mcp.json`, and `attachments/` when the Item has files.
+- Run folder layout: `item.md`, `result.md` (as the agent wrote it), `result.json` (parsed, only when valid), `report.html`, `agent.log`, `run.json`, `mcp.json`, and `attachments/` when the Item has files, and after Follow-ups `followups.json` and `followup-N.md`.
 - The structured result schema is versioned in `result.py` (`SCHEMA_VERSION`). Extend it additively.
 - Allowlist mode (`runner.py`) allows WebSearch, WebFetch, the `Agent` subagent tool (deep Runs fan out per source class), an `Edit(//<run folder>/**)` rule (Edit covers the Write tool; a `Write(...)` rule did not match when tried), and Read of each Context file by exact path. It does not use `--add-dir`. Every Run also passes `--settings '{"disableAllHooks": true}'`.
 - Nothing personal goes into the repo: no names, user paths or Context content.

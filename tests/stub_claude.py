@@ -7,9 +7,13 @@ import time
 
 prompt = sys.stdin.read()
 mode = os.environ.get("STUB_MODE", "ok")
-session_id = sys.argv[sys.argv.index("--session-id") + 1]
+flag = "--resume" if "--resume" in sys.argv else "--session-id"
+session_id = sys.argv[sys.argv.index(flag) + 1]
 
-if mode == "hang":
+if mode == "unknown_session" and flag == "--resume":
+    sys.stderr.write(f"No conversation found with session ID: {session_id}\n")
+    sys.exit(1)
+elif mode == "hang":
     with open("result.md", "w", encoding="utf-8") as f:
         f.write("partial text")
     time.sleep(60)

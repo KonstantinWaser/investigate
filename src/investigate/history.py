@@ -34,6 +34,7 @@ class HistoryEntry:
     created: str  # ISO 8601, UTC
     session_id: str | None
     verdicts: dict[str, int] | None = None  # Fact-checks: count per Verdict, else None
+    followup_of: str | None = None  # id of the Run this one continues as a new Run
     extra: dict = field(default_factory=dict)  # keys written by a newer version, kept on rewrite
 
 

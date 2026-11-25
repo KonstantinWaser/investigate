@@ -33,6 +33,7 @@ from investigate import history
 from investigate.attachments import AttachmentError, Upload, check_attachments
 from investigate.capture import capture_csp, capture_page
 from investigate.config import ConfigError, Depth, load_config
+from investigate.followup import FollowupError, FollowupManager
 from investigate.runner import Runner
 from investigate.runqueue import QueueClosed, RunQueue
 from investigate.service import execute_run, fail_run, reserve_run
@@ -174,6 +175,8 @@ class HistoryServer:
         self.queue = RunQueue(limit)
         self.on_finished = on_finished
         self._connections: set[socket.socket] = set()
+        self._ops = threading.RLock()  # delete and Follow-up start check and act as one step
+        self.followups = FollowupManager(home, runner, queue=self.queue, ops=self._ops)
 
     # lifecycle
 
@@ -256,7 +259,7 @@ class HistoryServer:
 
     def active_ids(self) -> set[str]:
         with self._lock:
-            return set(self._active)
+            return set(self._active) | self.followups.active_ids()
 
     def submit(self, text: str, urls: list[str], depth: str, files: list[tuple[str, bytes]]) -> str:
         """Start a Run in the background and return its id."""
@@ -339,20 +342,31 @@ class HistoryServer:
         # Windows maps "id." and other spellings onto the same folder; only the exact name counts.
         return folder if folder.parent == runs and folder.name == run_id else None
 
+    def ask_followup(self, run_id: str, question: str) -> None:
+        """Start a Follow-up on a finished Run in the background. Raises `FollowupError`."""
+        folder = self.run_folder(run_id)
+        if folder is None:
+            raise FollowupError("no such Run", HTTPStatus.NOT_FOUND)
+        with self._ops:
+            with self._lock:
+                busy = run_id in self._active
+            self.followups.start(run_id, question, folder=folder, busy_run=busy)
+
     def delete(self, run_id: str) -> str:
         """'deleted', 'busy' (still running here) or 'missing'."""
         folder = self.run_folder(run_id)
         if folder is None:
             return "missing"
-        if run_id in self.active_ids():
-            return "busy"
-        if not any(e.id == run_id for e in history.load_entries(self.home)):
-            return "missing"
-        existed = folder.is_dir()
-        if existed:
-            shutil.rmtree(folder, onexc=_make_writable_and_retry)
-        removed = history.remove(self.home, run_id)
-        return "deleted" if existed or removed else "missing"
+        with self._ops:  # a Follow-up cannot start between the check and the removal
+            if run_id in self.active_ids():
+                return "busy"
+            if not any(e.id == run_id for e in history.load_entries(self.home)):
+                return "missing"
+            existed = folder.is_dir()
+            if existed:
+                shutil.rmtree(folder, onexc=_make_writable_and_retry)
+            removed = history.remove(self.home, run_id)
+            return "deleted" if existed or removed else "missing"
 
     def served_file(self, run_id: str, rel: str) -> Path | None:
         """The Report, or a file under the Run's `attachments/` folder. Anything else is None."""
@@ -504,9 +518,16 @@ class _Handler(BaseHTTPRequestHandler):
             return
         data = file.read_bytes()
         if rel in ("", "report.html"):
+            run_id = unquote(raw_id)
+            with self.app._lock:
+                busy = run_id in self.app._active
+            data = self.app.followups.decorate(
+                run_id, data.decode("utf-8", "replace"), busy_run=busy
+            ).encode()
+            # No scripts at all: progress is a meta refresh, the ask box a plain form post.
             policy = (
                 "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; "
-                "frame-ancestors 'none'"
+                "frame-ancestors 'none'; form-action 'self'; base-uri 'none'"
             )
             self._send(
                 HTTPStatus.OK,
@@ -549,6 +570,10 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._json(HTTPStatus.ACCEPTED, {"id": run_id})
             return
+        match = re.fullmatch(r"/runs/([^/]+)/followup", path)
+        if match:
+            self._followup(unquote(match.group(1)), body)
+            return
         match = re.fullmatch(r"/runs/([^/]+)/delete", path)
         if match:
             self._delete(unquote(match.group(1)), redirect=True)
@@ -565,6 +590,30 @@ class _Handler(BaseHTTPRequestHandler):
             self._delete(unquote(match.group(1)), redirect=False)
         else:
             self._text(HTTPStatus.NOT_FOUND, "not found")
+
+    def _followup(self, run_id: str, body: bytes) -> None:
+        ctype = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        form = ctype == "application/x-www-form-urlencoded"
+        try:
+            if form:
+                question = (parse_qs(body.decode("utf-8", "replace")).get("question") or [""])[0]
+            elif ctype == "application/json":
+                data = json.loads(body)
+                question = data.get("question") if isinstance(data, dict) else None
+                if not isinstance(question, str):
+                    raise SubmitError("send a JSON object with a string 'question'")
+            else:
+                raise SubmitError("send urlencoded form data or JSON")
+            self.app.ask_followup(run_id, question)
+        except (SubmitError, FollowupError) as exc:
+            self._json(exc.status, {"error": str(exc)})
+        except ValueError:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid JSON"})
+        else:
+            if form:
+                self._redirect(f"/runs/{run_id}/")
+            else:
+                self._json(HTTPStatus.ACCEPTED, {"id": run_id})
 
     def _delete(self, run_id: str, *, redirect: bool) -> None:
         result = self.app.delete(run_id)
