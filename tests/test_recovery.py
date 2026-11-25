@@ -57,10 +57,14 @@ def test_recovery_fails_queued_and_dead_running_entries_but_not_live_ones(home):
     queued = _entry(home, "queued")
     dead = _entry(home, "running", pid=_dead_pid())
     no_pid = _entry(home, "running")
-    alive = _entry(home, "running", pid=os.getpid())
-    done = _entry(home, "completed")
-
-    fixed = recover_interrupted(home)
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        alive = _entry(home, "running", pid=other.pid)
+        done = _entry(home, "completed")
+        fixed = recover_interrupted(home)
+    finally:
+        other.kill()
+        other.wait()
 
     statuses = {e.id: e.status for e in history.load_entries(home)}
     assert set(fixed) == {queued.name, dead.name, no_pid.name}
@@ -93,3 +97,77 @@ def test_serve_refuses_to_start_while_a_host_holds_the_lock(home, capsys):
         lock.release()
     assert "already running at http://127.0.0.1:8765/" in capsys.readouterr().err
     assert {e.id: e.status for e in history.load_entries(home)}[stale.name] == "queued"
+
+
+def test_recovery_treats_a_running_run_with_this_hosts_own_pid_as_dead(home):
+    """A hard-killed host's pid can be handed to the new host. Under the lock, before any Run
+    started here, a pid equal to ours cannot be a live Run."""
+    reused = _entry(home, "running", pid=os.getpid())
+
+    assert recover_interrupted(home) == [reused.name]
+    assert history.load_entries(home)[-1].status == "failed"
+
+
+def test_a_finished_run_leaves_no_pid_file_behind(home):
+    from investigate.service import execute_run
+
+    result = execute_run("topic", Depth.QUICK, home=home, runner=FakeRunner())
+    assert not (result.folder / "running.pid").exists()
+
+
+def test_a_crashing_run_leaves_no_pid_file_behind(home):
+    from investigate.service import execute_run
+
+    class Boom(FakeRunner):
+        def run(self, request):
+            raise KeyboardInterrupt
+
+    import pytest
+
+    with pytest.raises(KeyboardInterrupt):
+        execute_run("topic", Depth.QUICK, home=home, runner=Boom())
+    folder = next((home / "runs").iterdir())
+    assert not (folder / "running.pid").exists()
+
+
+def test_recovery_runs_before_the_server_listens(home, monkeypatch):
+    """A submit that arrives in the gap would be marked Interrupted by a late recovery."""
+    import investigate.tray as tray_module
+    from investigate.tray import TrayApp, run_tray
+
+    order = []
+    real = tray_module.recover_interrupted
+    monkeypatch.setattr(
+        tray_module, "recover_interrupted", lambda h: (order.append("recover"), real(h))[1]
+    )
+
+    class Spy(TrayApp):
+        def start(self):
+            order.append("start")
+            super().start()
+
+    assert run_tray(home, FakeRunner(), lambda app: None, port=0, app_factory=Spy) == 0
+    assert order == ["recover", "start"]
+
+
+def test_serve_recovers_before_its_server_listens(home, monkeypatch):
+    import investigate.cli as cli_module
+
+    order = []
+    real = cli_module.recover_interrupted
+    monkeypatch.setattr(
+        cli_module, "recover_interrupted", lambda h: (order.append("recover"), real(h))[1]
+    )
+
+    class Spy(HistoryServer):
+        def start(self):
+            order.append("start")
+            super().start()
+
+        def serve_forever(self):
+            self.start()
+            self.shutdown(0.1)
+
+    monkeypatch.setattr(cli_module, "HistoryServer", Spy)
+    assert main(["serve", "--port", "0"], runner=FakeRunner()) == 0
+    assert order[:2] == ["recover", "start"]

@@ -33,6 +33,15 @@ class RunQueue:
             self._pending.append((job_id, work))
             self._dispatch()
 
+    def set_limit(self, limit: int) -> None:
+        """Change the parallel limit while running. Raising it starts waiting jobs at once;
+        lowering it lets the running ones finish and holds the next ones back."""
+        if limit < 1:
+            raise ValueError("the parallel limit must be at least 1")
+        with self._cond:
+            self.limit = limit
+            self._dispatch()
+
     def _dispatch(self) -> None:
         # Caller holds the lock.
         while self._pending and len(self._running) < self.limit:

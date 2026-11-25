@@ -5,7 +5,7 @@ description = "A personal research desk: hand it things to look into, get cited 
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = ["markdown-it-py>=3.0"]
+dependencies = ["markdown-it-py>=3.0", "tomlkit>=0.15.3"]
 
 [project.scripts]
 investigate = "investigate.cli:main"
@@ -13,6 +13,7 @@ investigate = "investigate.cli:main"
 [project.optional-dependencies]
 tray = [
     "pillow>=13.0.0",
+    "pynput>=1.8.2 ; sys_platform != 'win32'",
     "pystray>=0.19.5",
     "winotify>=1.1.0 ; sys_platform == 'win32'",
 ]

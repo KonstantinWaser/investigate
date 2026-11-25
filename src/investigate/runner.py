@@ -111,6 +111,15 @@ def build_command(command: list[str], request: RunRequest, *, resume: bool = Fal
     return cmd
 
 
+_CREATE_NO_WINDOW = 0x08000000
+
+
+def console_flags(platform: str | None = None) -> dict:
+    """`creationflags` so a console program started by a windowless host (the tray under
+    pythonw.exe after a login start) does not pop up a console window."""
+    return {"creationflags": _CREATE_NO_WINDOW} if (platform or sys.platform) == "win32" else {}
+
+
 def _kill_tree(proc: subprocess.Popen) -> None:
     try:
         if sys.platform == "win32":
@@ -118,6 +127,7 @@ def _kill_tree(proc: subprocess.Popen) -> None:
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                 capture_output=True,
                 check=False,
+                **console_flags(),
             )
         else:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -191,6 +201,7 @@ class ClaudeCodeRunner:
                 encoding="utf-8",
                 errors="replace",
                 start_new_session=sys.platform != "win32",
+                **console_flags(),
             )
         except OSError as exc:
             return RunnerOutcome(

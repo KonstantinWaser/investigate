@@ -104,6 +104,7 @@ def run(app: TrayApp) -> None:
 
     def setup(icon) -> None:
         icon.visible = True
+        app.activate()  # hotkey and start at login, now that a notice can be shown
         threading.Thread(target=watch, daemon=True).start()
 
     icon.run(setup)
