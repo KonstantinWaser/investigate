@@ -172,6 +172,13 @@ class YtDlpClient:
         # before `live_status` can be read, and the video would count as unfetchable.
         with self._ydl(ignore_no_formats_error=True) as ydl:
             info = ydl.extract_info(_watch_url(video_id), download=False)
+        if not info.get("formats") and _live_status(info) not in _NOT_READY:
+            # The flag also silences private, removed, age-gated and rate-limited videos;
+            # those must stay fetch failures so they are retried and given up on as before.
+            raise RuntimeError(
+                "YouTube returned no playable formats (private, removed, sign-in required "
+                "or rate-limited)"
+            )
         return VideoInfo(
             id=video_id,
             title=info.get("title") or video_id,

@@ -512,3 +512,21 @@ def test_a_long_video_whose_subtitles_fail_does_not_fall_back_to_audio():
     assert item.attachments == () and transcriber.transcribed == []
     assert "audio" not in [c[0] for c in client.calls]
     assert any("longer than the limit" in n for n in item.notes)
+
+
+class UnavailableYoutubeDL(FakeYoutubeDL):
+    """Like yt-dlp on a private or removed video with the no-formats error ignored."""
+
+    def extract_info(self, url, download=False):
+        return {"id": "abc", "formats": [], "live_status": "not_live"}
+
+
+def test_a_private_or_removed_video_still_fails_the_fetch(home, monkeypatch):
+    module = types.ModuleType("yt_dlp")
+    module.YoutubeDL = UnavailableYoutubeDL
+    monkeypatch.setitem(sys.modules, "yt_dlp", module)
+    client = YtDlpClient("https://www.youtube.com/playlist?list=PLabc")
+    source = YouTubeSource(client, FakeTranscriber(), pause_seconds=0)
+    with pytest.raises(Exception) as caught:
+        source.fetch(InboxRef("abc", "Gone"))
+    assert not isinstance(caught.value, ItemSkipped)
