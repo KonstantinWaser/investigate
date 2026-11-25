@@ -245,6 +245,10 @@ class HistoryServer:
         cancelled = self.queue.close()
         self.stop()
         for run_id in cancelled:
+            if self.followups.cancel(
+                run_id, "Cancelled: the app was quit before this Follow-up started."
+            ):
+                continue
             fail_run(self.home, run_id, "Cancelled: the app was quit before this Run started.")
             with self._lock:
                 self._active.discard(run_id)
@@ -519,8 +523,7 @@ class _Handler(BaseHTTPRequestHandler):
         data = file.read_bytes()
         if rel in ("", "report.html"):
             run_id = unquote(raw_id)
-            with self.app._lock:
-                busy = run_id in self.app._active
+            busy = run_id in self.app.active_ids()  # includes a running fallback Run
             data = self.app.followups.decorate(
                 run_id, data.decode("utf-8", "replace"), busy_run=busy
             ).encode()

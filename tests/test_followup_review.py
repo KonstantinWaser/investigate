@@ -316,3 +316,49 @@ def test_served_report_csp_keeps_frame_ancestors_and_the_form_rules(home):
         assert "script-src" not in csp
     finally:
         srv.stop()
+
+
+def test_a_queued_followup_dropped_on_quit_is_stored_as_cancelled(home):
+    runner = _Blocking()
+    srv = HistoryServer(home, runner, port=0, max_parallel=1)
+    srv.start()
+    try:
+        client = Client(srv)
+        done = execute_run("topic", Depth.QUICK, home=home, runner=runner, now=NOW)
+        runner.block = True
+        body = json.dumps({"text": "another"}).encode()
+        assert client.post("/api/runs", body, {"Content-Type": "application/json"})[0] == 202
+        assert runner.started.wait(10)
+        assert client.post(f"/runs/{done.id}/followup", b"question=dropped", FORM)[0] == 303
+        threading.Timer(0.3, runner.release.set).start()
+        srv.shutdown(0.1)
+    finally:
+        runner.release.set()
+        srv.stop()
+    (entry,) = read_followups(done.folder)
+    assert entry["question"] == "dropped" and entry["status"] == "failed"
+    assert "Cancelled" in entry["error"]
+    assert "Cancelled" in done.report_path.read_text(encoding="utf-8")
+    assert srv.followups.active_ids() == set()
+
+
+def test_the_ask_box_is_hidden_on_a_running_fallback_run(home):
+    runner = GatedRunner(resume_unavailable=True)
+    srv = HistoryServer(home, runner, port=0)
+    srv.start()
+    try:
+        client = Client(srv)
+        result = execute_run("topic", Depth.QUICK, home=home, runner=runner, now=NOW)
+        runner.gated = True
+        assert client.post(f"/runs/{result.id}/followup", b"question=q", FORM)[0] == 303
+        assert runner.started.wait(10)
+        (new_id,) = [e.id for e in history.load_entries(home) if e.id != result.id]
+        report = home / "runs" / new_id / "report.html"
+        report.write_text("<html><head></head><body><main>x</main></body></html>", "utf-8")
+        page = client.get(f"/runs/{new_id}/")[2].decode()
+        assert "Ask a follow-up" not in page
+        runner.release.set()
+        assert srv.followups.wait()
+    finally:
+        runner.release.set()
+        srv.stop()

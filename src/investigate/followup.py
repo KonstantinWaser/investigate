@@ -297,6 +297,25 @@ class FollowupManager:
                 self._active.pop(run_id, None)
                 self._new_runs.difference_update(mine)
 
+    def cancel(self, job_id: str, reason: str) -> bool:
+        """Store a Follow-up the queue dropped before it started as failed with `reason`, and
+        clear it from the active set. Returns False when `job_id` is not a Follow-up job."""
+        if not job_id.startswith(JOB_PREFIX):
+            return False
+        run_id = job_id[len(JOB_PREFIX) :]
+        with self._lock:
+            question = self._active.pop(run_id, None)
+        if question is None:
+            return True
+        folder = self.home / "runs" / run_id
+        asked = datetime.now(UTC).astimezone().isoformat(timespec="minutes")
+        entry = {"asked": asked, "question": question, "mode": "resumed", "text": ""}
+        entry.update(status="failed", error=reason, new_run_id=None)
+        with self._ops:
+            if folder.is_dir():
+                _store(folder, [*read_followups(folder), entry])
+        return True
+
     # serving
 
     def decorate(self, run_id: str, html: str, *, busy_run: bool) -> str:
