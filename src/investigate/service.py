@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from investigate import history
+from investigate import factcheck, history
 from investigate.attachments import AttachmentSource, check_attachments, store_attachments
 from investigate.browser import is_logged_in, kill_profile_browsers, profile_dir
 from investigate.config import Config, Depth, load_config
@@ -92,8 +92,13 @@ def reserve_run(
     home: Path,
     attachments: Sequence[AttachmentSource] = (),
     now: datetime | None = None,
+    kind: str = KIND,
+    promoted_from: str | None = None,
+    notes: Sequence[str] = (),
 ) -> Path:
     """Make the run folder and list the Run as `queued`; `execute_run(reserved=...)` starts it.
+
+    `notes` are saved as `notes.json` right away, so they survive a Run that never starts.
 
     Pass the same `now` to both so the entry keeps the time the Item was handed in.
     """
@@ -101,9 +106,18 @@ def reserve_run(
     label = _label(item, attachments)
     folder = _new_run_folder(home, now.astimezone(), label)
     (folder / "item.md").write_text(item, encoding="utf-8")
+    if notes:
+        (folder / "notes.json").write_text(json.dumps(list(notes), indent=2), encoding="utf-8")
     created = now.isoformat(timespec="seconds")
     entry = history.HistoryEntry(
-        folder.name, KIND, depth.value, "queued", _item_title(label), created, None
+        folder.name,
+        kind,
+        depth.value,
+        "queued",
+        _item_title(label),
+        created,
+        None,
+        promoted_from=promoted_from,
     )
     history.upsert(home, entry)
     return folder
@@ -130,16 +144,36 @@ def execute_run(
     now: datetime | None = None,
     attachments: Sequence[AttachmentSource] = (),
     reserved: Path | None = None,
+    kind: str = KIND,
+    notes: Sequence[str] = (),
+    promoted_from: str | None = None,
 ) -> RunResult:
-    """Run one Investigation end to end. Runner problems become a `failed` Run, not an exception.
+    """Run one Investigation (or, with `kind`, a Fact-check) end to end.
 
+    Runner problems become a `failed` Run, not an exception.
+
+    `notes` go into the run log and show as notices in the Report (a missing transcript, say).
+    `promoted_from` is the id of the Fact-check an Investigation was promoted from.
     `attachments` are copied into the run folder. A missing or oversize one raises
     `AttachmentError` before any run folder exists. `reserved` is a folder from `reserve_run`.
     An exception after the Run is listed leaves it `failed`, never stuck on `running`.
     """
     started: list[str] = []
     try:
-        return _execute_run(item, depth, home, runner, config, now, attachments, reserved, started)
+        return _execute_run(
+            item,
+            depth,
+            home,
+            runner,
+            config,
+            now,
+            attachments,
+            reserved,
+            started,
+            kind,
+            tuple(notes),
+            promoted_from,
+        )
     except BaseException as exc:
         for run_id in started:
             fail_run(home, run_id, f"{type(exc).__name__}: {exc}")
@@ -161,6 +195,9 @@ def _execute_run(
     attachments: Sequence[AttachmentSource],
     reserved: Path | None,
     started: list[str],
+    kind: str,
+    notes: tuple[str, ...],
+    promoted_from: str | None,
 ) -> RunResult:
     config = config or load_config(home)
     now = now or datetime.now(UTC)
@@ -178,12 +215,23 @@ def _execute_run(
         raise
     session_id = str(uuid.uuid4())
 
-    def entry(status: str, title: str, sid: str | None) -> history.HistoryEntry:
+    def entry(
+        status: str, title: str, sid: str | None, verdicts: dict[str, int] | None = None
+    ) -> history.HistoryEntry:
         # A Follow-up fallback Run is linked when it is reserved; keep that link on every rewrite.
         prior = next((e for e in history.load_entries(home) if e.id == run_id), None)
         link = prior.followup_of if prior else None
         return history.HistoryEntry(
-            run_id, KIND, depth.value, status, title, created, sid, followup_of=link
+            run_id,
+            kind,
+            depth.value,
+            status,
+            title,
+            created,
+            sid,
+            verdicts,
+            followup_of=link,
+            promoted_from=promoted_from,
         )
 
     # Recovery after a hard kill tells a dead Run from a live one by this pid.
@@ -195,7 +243,7 @@ def _execute_run(
     # A Context file that is missing is noted in the run log and skipped, never fatal.
     contexts = tuple((c.name, Path(c.path)) for c in config.contexts if Path(c.path).is_file())
     present = {name for name, _ in contexts}
-    context_notes = [
+    context_notes = [f"NOTE: {note}" + chr(10) for note in notes] + [
         f"WARNING: Context {c.name!r} skipped, file not found: {c.path}" + chr(10)
         for c in config.contexts
         if c.name not in present
@@ -219,7 +267,7 @@ def _execute_run(
         except ProfileBusy:
             use_browser = False
     request = RunRequest(
-        prompt=build_prompt(item, depth, config.language, contexts, stored, use_browser),
+        prompt=build_prompt(item, depth, config.language, contexts, stored, use_browser, kind),
         workdir=folder,
         session_id=session_id,
         timeout_seconds=settings.timeout_minutes * 60,
@@ -239,7 +287,8 @@ def _execute_run(
     if outcome.error and outcome.error not in log:
         log += f"\nERROR: {outcome.error}\n"
     (folder / "agent.log").write_text(log, encoding="utf-8")
-    parsed = parse_result(_read_result(folder, outcome))
+    parsed = parse_result(_read_result(folder, outcome), fact_check=kind == factcheck.KIND)
+    notes = (*notes, *parsed.warnings)
     if parsed.structured:
         (folder / "result.json").write_text(
             json.dumps(parsed.structured.to_json(), indent=2, ensure_ascii=False),
@@ -259,7 +308,7 @@ def _execute_run(
         ReportInput(
             title=title,
             item=item,
-            kind=KIND,
+            kind=kind,
             depth=depth.value,
             status=status,
             created=created,
@@ -267,6 +316,9 @@ def _execute_run(
             error=outcome.error if status == "failed" else None,
             contexts=tuple(name for name, _ in contexts),
             attachments=stored,
+            notes=notes,
+            run_id=run_id,
+            promoted_from=promoted_from,
         )
     )
     report_path = folder / "report.html"
@@ -275,7 +327,7 @@ def _execute_run(
         json.dumps(
             {
                 "id": run_id,
-                "kind": KIND,
+                "kind": kind,
                 "depth": depth.value,
                 "status": status,
                 "title": title,
@@ -287,11 +339,14 @@ def _execute_run(
                 "browser": use_browser,
                 "workdir": str(folder),  # the agent's cwd; a Follow-up resumes in the same one
                 "result_problems": list(parsed.problems),
+                "notes": list(notes),
+                "promoted_from": promoted_from,
                 "attachments": [{"name": a.name, "size": a.size} for a in stored],
             },
             indent=2,
         ),
         encoding="utf-8",
     )
-    history.upsert(home, entry(status, title, sid))
+    verdicts = parsed.structured.verdict_counts() if parsed.structured else None
+    history.upsert(home, entry(status, title, sid, verdicts))
     return RunResult(run_id, folder, status, report_path, title, sid)

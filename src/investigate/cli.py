@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from investigate import browser, history
@@ -12,6 +12,13 @@ from investigate.attachments import AttachmentError
 from investigate.autostart import default_autostart, entry_suffix
 from investigate.config import ConfigError, Depth, data_home, load_config
 from investigate.hotkeys import default_hotkeys
+from investigate.inbox import (
+    InboxConfig,
+    InboxSource,
+    check_inbox,
+    default_sources,
+    load_inbox_config,
+)
 from investigate.instance import InstanceLock, recover_interrupted, running_url
 from investigate.runner import ClaudeCodeRunner, Runner
 from investigate.server import DEFAULT_PORT, HistoryServer
@@ -38,6 +45,10 @@ def _parser() -> argparse.ArgumentParser:
         choices=list(Depth),
         default=Depth.STANDARD,
         help="quick, standard (default) or deep.",
+    )
+    sub.add_parser(
+        "inbox",
+        help="Fact-check the videos newly saved in your YouTube playlist (see config.toml).",
     )
     sub.add_parser("history", help="List past Runs.")
     sub.add_parser("login", help="Open the browser profile to log in to YouTube, Instagram, X.")
@@ -91,7 +102,59 @@ def _serve(home: Path, args: argparse.Namespace, runner: Runner) -> int:
         lock.release()
 
 
-def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int:
+def _inbox(
+    home: Path, runner: Runner, make_sources: Callable[[InboxConfig], list[InboxSource]]
+) -> int:
+    """One inbox check. The Fact-checks go through the same Run queue as the server's, so
+    `parallel_runs` applies; this waits until they have all finished."""
+    try:
+        inbox = load_inbox_config(home)
+        load_config(home)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if not inbox.configured:
+        print(
+            "error: no playlist set. In config.toml add a [inbox.youtube] table with "
+            'playlist = "PLxxxxxxxxxxxx" (a playlist id or URL).',
+            file=sys.stderr,
+        )
+        return 2
+    server = HistoryServer(home, runner)  # not started: only its Run queue is used
+    result = check_inbox(
+        home,
+        make_sources(inbox),
+        lambda item: server.submit_fact_check(item.text, inbox.depth, item.attachments, item.notes),
+    )
+    if result.busy:
+        print("Another inbox check is running. Nothing done.")
+        return 1
+    for created in result.created:
+        print(f"queued Fact-check: {created.title}")
+    for error in result.errors:
+        print(f"error: {error}", file=sys.stderr)
+    print(
+        f"{len(result.created)} new, {result.already_processed} already checked."
+        + (" Waiting for the Fact-checks to finish." if result.created else "")
+    )
+    try:
+        server.queue.wait_idle()
+    except KeyboardInterrupt:
+        server.shutdown(0)
+        return 130
+    done = {e.id: e for e in history.load_entries(home)}
+    for created in result.created:
+        entry = done.get(created.run_id)
+        print(f"{entry.status if entry else 'unknown'}: {created.title}")
+        print(f"Report: {home / 'runs' / created.run_id / 'report.html'}")
+    return 1 if result.errors else 0
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    runner: Runner | None = None,
+    inbox_sources: Callable[[InboxConfig], list[InboxSource]] = default_sources,
+) -> int:
     args = _parser().parse_args(argv)
     home = data_home()
     if args.command == "history":
@@ -99,6 +162,8 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
             print(f"{e.id}  {e.kind}  {e.depth}  {e.status}  {e.title}")
         return 0
 
+    if args.command == "inbox":
+        return _inbox(home, runner or ClaudeCodeRunner(), inbox_sources)
     if args.command == "login":
         return browser.login(home)
     if args.command == "tray":

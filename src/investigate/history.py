@@ -35,6 +35,7 @@ class HistoryEntry:
     session_id: str | None
     verdicts: dict[str, int] | None = None  # Fact-checks: count per Verdict, else None
     followup_of: str | None = None  # id of the Run this one continues as a new Run
+    promoted_from: str | None = None  # an Investigation promoted from this Fact-check's id
     extra: dict = field(default_factory=dict)  # keys written by a newer version, kept on rewrite
 
 

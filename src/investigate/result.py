@@ -11,6 +11,37 @@ from dataclasses import dataclass, field
 
 SCHEMA_VERSION = 1
 CONFIDENCES = ("high", "medium", "low")
+VERDICTS = ("confirmed", "partly_true", "outdated", "unverified", "wrong")
+
+# Wording an agent often uses instead of a Verdict, read after lower-casing and turning spaces and
+# hyphens into underscores. Anything not here (and not a Verdict) becomes `unverified` with a
+# warning in the Report, so one odd word does not discard a whole Fact-check.
+VERDICT_ALIASES = {
+    "true": "confirmed",
+    "accurate": "confirmed",
+    "correct": "confirmed",
+    "verified": "confirmed",
+    "supported": "confirmed",
+    "partially_true": "partly_true",
+    "mostly_true": "partly_true",
+    "half_true": "partly_true",
+    "partly_correct": "partly_true",
+    "mixed": "partly_true",
+    "misleading": "partly_true",
+    "out_of_date": "outdated",
+    "obsolete": "outdated",
+    "stale": "outdated",
+    "unknown": "unverified",
+    "unclear": "unverified",
+    "unproven": "unverified",
+    "inconclusive": "unverified",
+    "false": "wrong",
+    "incorrect": "wrong",
+    "inaccurate": "wrong",
+    "untrue": "wrong",
+    "mostly_false": "wrong",
+    "debunked": "wrong",
+}
 
 # Shown to the agent in the prompt. Keep in step with `parse_result`.
 SCHEMA_EXAMPLE = """\
@@ -24,6 +55,25 @@ SCHEMA_EXAMPLE = """\
       "claim": "One checkable statement.",
       "detail": "Optional context, dates, caveats.",
       "confidence": "high",
+      "citations": [
+        {"title": "Page title", "url": "https://example.com/page", "note": "What it shows"}
+      ]
+    }
+  ]
+}
+```"""
+
+# Shown to the agent in a Fact-check prompt. Keep in step with `_claim`.
+CLAIMS_EXAMPLE = """```json
+{
+  "schema_version": 1,
+  "title": "Title of the Item that was checked",
+  "summary": "Two to four sentences: how reliable is the Item overall?",
+  "claims": [
+    {
+      "claim": "One checkable statement the Item makes.",
+      "verdict": "confirmed",
+      "reason": "One sentence saying why.",
       "citations": [
         {"title": "Page title", "url": "https://example.com/page", "note": "What it shows"}
       ]
@@ -61,6 +111,16 @@ class Finding:
 
 
 @dataclass(frozen=True)
+class Claim:
+    """One statement an Item makes, with the Verdict on it. Only Fact-checks have these."""
+
+    claim: str
+    verdict: str  # one of VERDICTS
+    reason: str  # one sentence
+    citations: tuple[Citation, ...]
+
+
+@dataclass(frozen=True)
 class ContextRelevance:
     context: str  # the Context's name from config
     relevant: bool
@@ -73,6 +133,13 @@ class StructuredResult:
     summary: str
     findings: tuple[Finding, ...]
     relevance: tuple[ContextRelevance, ...] = ()
+    claims: tuple[Claim, ...] | None = None  # None: not a Fact-check; () means no claims found
+
+    def verdict_counts(self) -> dict[str, int] | None:
+        """Claims per Verdict in VERDICTS order, zero counts left out; None for a non-Fact-check."""
+        if self.claims is None:
+            return None
+        return {v: n for v in VERDICTS if (n := sum(c.verdict == v for c in self.claims))}
 
     def to_json(self) -> dict:
         data = {
@@ -91,6 +158,18 @@ class StructuredResult:
                 for f in self.findings
             ],
         }
+        if self.claims is not None:
+            data["claims"] = [
+                {
+                    "claim": c.claim,
+                    "verdict": c.verdict,
+                    "reason": c.reason,
+                    "citations": [
+                        {"title": x.title, "url": x.url, "note": x.note} for x in c.citations
+                    ],
+                }
+                for c in self.claims
+            ]
         if self.relevance:
             data["relevance"] = [
                 {"context": r.context, "relevant": r.relevant, "text": r.text}
@@ -104,9 +183,11 @@ class ParsedResult:
     body: str  # Markdown text outside the JSON block
     structured: StructuredResult | None
     problems: tuple[str, ...] = field(default=())
+    warnings: tuple[str, ...] = field(default=())  # repaired, not rejected (an odd Verdict)
 
 
-def parse_result(text: str | None) -> ParsedResult:
+def parse_result(text: str | None, *, fact_check: bool = False) -> ParsedResult:
+    """A Fact-check lists `claims` where an Investigation lists `findings`."""
     if not text or not text.strip():
         return ParsedResult("", None, ("The agent produced no result.",))
     matches = list(_JSON_BLOCK.finditer(text))
@@ -121,17 +202,20 @@ def parse_result(text: str | None) -> ParsedResult:
     except json.JSONDecodeError as exc:
         return ParsedResult(body, None, (f"The JSON block is not valid JSON: {exc}",))
     problems: list[str] = []
-    structured = _validate(data, problems)
+    warnings: list[str] = []
+    structured = _validate(data, problems, fact_check, warnings)
     if problems:
         return ParsedResult(body, None, tuple(problems))
-    return ParsedResult(body, structured)
+    return ParsedResult(body, structured, warnings=tuple(warnings))
 
 
 def _text(value: object) -> str | None:
     return value.strip() if isinstance(value, str) else None
 
 
-def _validate(data: object, problems: list[str]) -> StructuredResult | None:
+def _validate(
+    data: object, problems: list[str], fact_check: bool, warnings: list[str]
+) -> StructuredResult | None:
     if not isinstance(data, dict):
         problems.append("The JSON block is not an object.")
         return None
@@ -141,19 +225,37 @@ def _validate(data: object, problems: list[str]) -> StructuredResult | None:
     summary = _text(data.get("summary"))
     if summary is None:
         problems.append("'summary' is missing or not a string.")
-    raw_findings = data.get("findings")
     findings: list[Finding] = []
-    if not isinstance(raw_findings, list):
-        problems.append("'findings' is missing or not a list.")
+    claims: list[Claim] | None = None
+    if fact_check:
+        raw_claims = data.get("claims")
+        claims = []
+        if not isinstance(raw_claims, list):
+            problems.append("'claims' is missing or not a list.")
+        else:
+            for i, item in enumerate(raw_claims):
+                claim = _claim(item, i, problems, warnings)
+                if claim:
+                    claims.append(claim)
     else:
-        for i, item in enumerate(raw_findings):
-            finding = _finding(item, i, problems)
-            if finding:
-                findings.append(finding)
+        raw_findings = data.get("findings")
+        if not isinstance(raw_findings, list):
+            problems.append("'findings' is missing or not a list.")
+        else:
+            for i, item in enumerate(raw_findings):
+                finding = _finding(item, i, problems)
+                if finding:
+                    findings.append(finding)
     relevance = _relevance(data.get("relevance", []), problems)
     if problems:
         return None
-    return StructuredResult(title or "", summary or "", tuple(findings), relevance)
+    return StructuredResult(
+        title or "",
+        summary or "",
+        tuple(findings),
+        relevance,
+        None if claims is None else tuple(claims),
+    )
 
 
 def _relevance(raw: object, problems: list[str]) -> tuple[ContextRelevance, ...]:
@@ -197,19 +299,51 @@ def _finding(item: object, index: int, problems: list[str]) -> Finding | None:
     if not isinstance(detail, str):
         problems.append(f"{where}.detail is not a string.")
         detail = ""
-    raw_citations = item.get("citations", [])
-    citations: list[Citation] = []
-    if not isinstance(raw_citations, list):
-        problems.append(f"{where}.citations is not a list.")
-    else:
-        for j, raw in enumerate(raw_citations):
-            url = _text(raw.get("url")) if isinstance(raw, dict) else None
-            if not url:
-                problems.append(f"{where}.citations[{j}] needs a string 'url'.")
-                continue
-            title = _text(raw.get("title")) or url
-            note = _text(raw.get("note")) or ""
-            citations.append(Citation(title, url, note))
+    citations = _citations(item.get("citations", []), where, problems)
     if not claim or confidence not in CONFIDENCES:
         return None
     return Finding(claim, detail.strip(), confidence, tuple(citations))
+
+
+def _citations(raw: object, where: str, problems: list[str]) -> list[Citation]:
+    if not isinstance(raw, list):
+        problems.append(f"{where}.citations is not a list.")
+        return []
+    citations: list[Citation] = []
+    for j, entry in enumerate(raw):
+        url = _text(entry.get("url")) if isinstance(entry, dict) else None
+        if not url:
+            problems.append(f"{where}.citations[{j}] needs a string 'url'.")
+            continue
+        title = _text(entry.get("title")) or url
+        note = _text(entry.get("note")) or ""
+        citations.append(Citation(title, url, note))
+    return citations
+
+
+def _claim(item: object, index: int, problems: list[str], warnings: list[str]) -> Claim | None:
+    where = f"claims[{index}]"
+    if not isinstance(item, dict):
+        problems.append(f"{where} is not an object.")
+        return None
+    claim = _text(item.get("claim"))
+    if not claim:
+        problems.append(f"{where}.claim is missing or not a non-empty string.")
+    said = _text(item.get("verdict"))
+    verdict = said.lower().replace(" ", "_").replace("-", "_") if said else None
+    verdict = VERDICT_ALIASES.get(verdict, verdict) if verdict else None
+    if said and verdict not in VERDICTS:
+        warnings.append(
+            f"{where}.verdict {said!r} is not a Verdict ({', '.join(VERDICTS)}); "
+            "it was recorded as unverified."
+        )
+        verdict = "unverified"
+    elif not said:
+        problems.append(f"{where}.verdict must be one of {', '.join(VERDICTS)}.")
+    reason = _text(item.get("reason"))
+    if not reason:
+        problems.append(f"{where}.reason is missing or not a non-empty string.")
+    citations = _citations(item.get("citations", []), where, problems)
+    if not claim or verdict not in VERDICTS or not reason:
+        return None
+    return Claim(claim, verdict, reason, tuple(citations))
