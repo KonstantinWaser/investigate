@@ -210,6 +210,7 @@ class HistoryServer:
             )
         self._httpd = server_cls((self.host, self.port), handler)
         self._httpd.daemon_threads = True
+        self._httpd.handle_error = lambda request, client_address: None  # resets are routine
         self.port = self._httpd.server_address[1]
         self._thread = threading.Thread(
             target=self._httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
