@@ -29,7 +29,7 @@ class HistoryEntry:
     id: str  # also the run folder name under `runs/`
     kind: str
     depth: str
-    status: str  # running | completed | partial | failed
+    status: str  # queued | running | completed | partial | failed
     title: str
     created: str  # ISO 8601, UTC
     session_id: str | None

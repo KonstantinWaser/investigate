@@ -13,6 +13,7 @@ from investigate.config import ConfigError, Depth, data_home, load_config
 from investigate.runner import ClaudeCodeRunner, Runner
 from investigate.server import DEFAULT_PORT, HistoryServer
 from investigate.service import execute_run
+from investigate.tray import run_tray
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -37,6 +38,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("history", help="List past Runs.")
     sub.add_parser("login", help="Open the browser profile to log in to YouTube, Instagram, X.")
+    tray = sub.add_parser("tray", help="Run the tray app: icon, quick capture and the server.")
+    tray.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port (default 8765).")
     serve = sub.add_parser("serve", help="Serve the History and Reports on localhost.")
     serve.add_argument("--host", default="127.0.0.1", help="Address to bind (default 127.0.0.1).")
     serve.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port (default 8765).")
@@ -58,6 +61,16 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
 
     if args.command == "login":
         return browser.login(home)
+    if args.command == "tray":
+        try:
+            from investigate import tray_gui
+        except ImportError as exc:
+            print(
+                f"error: the tray needs its extra ({exc}). Install it with: uv sync --extra tray",
+                file=sys.stderr,
+            )
+            return 2
+        return run_tray(home, runner or ClaudeCodeRunner(), tray_gui.run, port=args.port)
     if args.command == "serve":
         try:
             server = HistoryServer(

@@ -9,7 +9,7 @@ import traceback
 import uuid
 from collections.abc import Sequence
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -79,6 +79,46 @@ def _read_result(folder: Path, outcome: RunnerOutcome) -> str:
     return outcome.text
 
 
+def _label(item: str, attachments: Sequence[AttachmentSource]) -> str:
+    # With no text, the first attachment's name stands in for the Item in folder name and title.
+    return item if item.strip() else (getattr(attachments[0], "name", "") if attachments else "")
+
+
+def reserve_run(
+    item: str,
+    depth: Depth,
+    *,
+    home: Path,
+    attachments: Sequence[AttachmentSource] = (),
+    now: datetime | None = None,
+) -> Path:
+    """Make the run folder and list the Run as `queued`; `execute_run(reserved=...)` starts it.
+
+    Pass the same `now` to both so the entry keeps the time the Item was handed in.
+    """
+    now = now or datetime.now(UTC)
+    label = _label(item, attachments)
+    folder = _new_run_folder(home, now.astimezone(), label)
+    (folder / "item.md").write_text(item, encoding="utf-8")
+    created = now.isoformat(timespec="seconds")
+    entry = history.HistoryEntry(
+        folder.name, KIND, depth.value, "queued", _item_title(label), created, None
+    )
+    history.upsert(home, entry)
+    return folder
+
+
+def fail_run(home: Path, run_id: str, error: str) -> None:
+    """Mark a Run that crashed (still `queued` or `running`) as failed and log why."""
+    try:
+        entry = next(e for e in history.load_entries(home) if e.id == run_id)
+        history.upsert(home, replace(entry, status="failed"))
+        with open(home / "runs" / run_id / "agent.log", "a", encoding="utf-8") as log:
+            log.write(f"{chr(10)}ERROR: {error}{chr(10)}")
+    except (StopIteration, OSError):
+        pass
+
+
 def execute_run(
     item: str,
     depth: Depth,
@@ -88,19 +128,40 @@ def execute_run(
     config: Config | None = None,
     now: datetime | None = None,
     attachments: Sequence[AttachmentSource] = (),
+    reserved: Path | None = None,
 ) -> RunResult:
     """Run one Investigation end to end. Runner problems become a `failed` Run, not an exception.
 
     `attachments` are copied into the run folder. A missing or oversize one raises
-    `AttachmentError` before any run folder exists.
+    `AttachmentError` before any run folder exists. `reserved` is a folder from `reserve_run`.
+    An exception after the Run is listed leaves it `failed`, never stuck on `running`.
     """
+    started: list[str] = []
+    try:
+        return _execute_run(item, depth, home, runner, config, now, attachments, reserved, started)
+    except BaseException as exc:
+        for run_id in started:
+            fail_run(home, run_id, f"{type(exc).__name__}: {exc}")
+        raise
+
+
+def _execute_run(
+    item: str,
+    depth: Depth,
+    home: Path,
+    runner: Runner,
+    config: Config | None,
+    now: datetime | None,
+    attachments: Sequence[AttachmentSource],
+    reserved: Path | None,
+    started: list[str],
+) -> RunResult:
     config = config or load_config(home)
     now = now or datetime.now(UTC)
     max_bytes = int(config.max_attachment_mb * 1_048_576)
     check_attachments(attachments, max_bytes)
-    # With no text, the first attachment's name stands in for the Item in folder name and title.
-    label = item if item.strip() else (getattr(attachments[0], "name", "") if attachments else "")
-    folder = _new_run_folder(home, now.astimezone(), label)
+    label = _label(item, attachments)
+    folder = reserved or _new_run_folder(home, now.astimezone(), label)
     run_id = folder.name
     created = now.isoformat(timespec="seconds")
     (folder / "item.md").write_text(item, encoding="utf-8")
@@ -115,6 +176,7 @@ def execute_run(
         return history.HistoryEntry(run_id, KIND, depth.value, status, title, created, sid)
 
     history.upsert(home, entry("running", _item_title(label), session_id))
+    started.append(run_id)
 
     settings = config.depths[depth]
     # A Context file that is missing is noted in the run log and skipped, never fatal.

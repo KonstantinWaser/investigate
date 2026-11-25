@@ -10,7 +10,6 @@ page).
 from __future__ import annotations
 
 import contextlib
-import dataclasses
 import email.policy
 import ipaddress
 import json
@@ -21,6 +20,9 @@ import shutil
 import socket
 import stat
 import threading
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from email.parser import BytesParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,9 +31,11 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from investigate import history
 from investigate.attachments import AttachmentError, Upload, check_attachments
+from investigate.capture import capture_page
 from investigate.config import ConfigError, Depth, load_config
-from investigate.runner import Runner, RunnerOutcome, RunRequest
-from investigate.service import execute_run
+from investigate.runner import Runner
+from investigate.runqueue import QueueClosed, RunQueue
+from investigate.service import execute_run, fail_run, reserve_run
 from investigate.webpages import Filters, apply_filters, history_page
 
 DEFAULT_PORT = 8765
@@ -123,17 +127,13 @@ def request_allowed(headers, *, state_changing: bool, allow_remote: bool) -> boo
     return site is None or site in ("same-origin", "none")
 
 
-class _AnnouncingRunner:
-    """Wraps the real runner and reports the run folder to the submit call as soon as the Run
-    exists, so the id can be returned before the agent has finished."""
+@dataclass(frozen=True)
+class FinishedRun:
+    """What `on_finished` hears about a Run that has ended (success, partial or failed)."""
 
-    def __init__(self, inner: Runner, announce) -> None:
-        self.inner, self.announce = inner, announce
-        self.name = inner.name
-
-    def run(self, request: RunRequest) -> RunnerOutcome:
-        self.announce(request.workdir.name)
-        return self.inner.run(request)
+    id: str
+    status: str
+    title: str
 
 
 def _make_writable_and_retry(func, path, exc) -> None:
@@ -153,6 +153,8 @@ class HistoryServer:
         host: str = "127.0.0.1",
         port: int = DEFAULT_PORT,
         allow_remote: bool = False,
+        max_parallel: int | None = None,
+        on_finished: Callable[[FinishedRun], None] | None = None,
     ) -> None:
         if not allow_remote and not is_loopback(host):
             raise ValueError(
@@ -164,8 +166,11 @@ class HistoryServer:
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._active: set[str] = set()
-        self._workers: list[threading.Thread] = []
+        self._active: set[str] = set()  # queued or running here: cannot be deleted
+        # The parallel limit comes from config.toml unless given; it is read once at start-up.
+        limit = max_parallel if max_parallel is not None else load_config(home).parallel_runs
+        self.queue = RunQueue(limit)
+        self.on_finished = on_finished
         self._connections: set[socket.socket] = set()
 
     # lifecycle
@@ -220,12 +225,25 @@ class HistoryServer:
         return f"http://{host}:{self.port}/"
 
     def wait_for_runs(self, timeout: float = 30) -> bool:
-        """Wait until every background Run has finished."""
-        with self._lock:
-            workers = list(self._workers)
-        for worker in workers:
-            worker.join(timeout)
-        return not any(w.is_alive() for w in workers)
+        """Wait until every queued and running Run has finished."""
+        return self.queue.wait_idle(timeout)
+
+    def shutdown(self, grace: float = 10.0) -> None:
+        """Quit: stop serving and take no more Runs. Queued Runs that never started are marked
+        failed. Running Runs get `grace` seconds, then the runner stops them and they end as
+        `partial` with what they had. Returns once nothing is left running."""
+        cancelled = self.queue.close()
+        self.stop()
+        for run_id in cancelled:
+            fail_run(self.home, run_id, "Cancelled: the app was quit before this Run started.")
+            with self._lock:
+                self._active.discard(run_id)
+        if self.queue.wait_idle(grace):
+            return
+        stop_runs = getattr(self.runner, "stop", None)
+        if callable(stop_runs):
+            stop_runs()
+        self.queue.wait_idle(30)
 
     # actions
 
@@ -255,52 +273,55 @@ class HistoryServer:
             raise SubmitError(str(exc), 413 if too_big else 400) from exc
         item = chr(10).join(p for p in [text.strip(), *urls] if p)
 
-        announced = threading.Event()
-        box: dict[str, str] = {}
-
-        def announce(run_id: str) -> None:
-            box["id"] = run_id
-            with self._lock:
-                self._active.add(run_id)
-            announced.set()
-
-        wrapper = _AnnouncingRunner(self.runner, announce)
+        now = datetime.now(UTC)
+        try:
+            folder = reserve_run(item, chosen, home=self.home, attachments=uploads, now=now)
+        except OSError as exc:
+            raise RuntimeError(f"could not create the run folder: {exc}") from exc
+        run_id = folder.name
+        with self._lock:
+            self._active.add(run_id)
 
         def work() -> None:
             try:
-                execute_run(item, chosen, home=self.home, runner=wrapper, attachments=uploads)
-            except Exception as exc:  # reported to the submitter if it is still waiting
-                box.setdefault("error", f"{type(exc).__name__}: {exc}")
-                self._mark_failed(box.get("id"), box["error"])
+                execute_run(
+                    item,
+                    chosen,
+                    home=self.home,
+                    runner=self.runner,
+                    now=now,
+                    attachments=uploads,
+                    reserved=folder,
+                )
+            except Exception as exc:  # the entry must not stay queued or running
+                self._mark_failed(run_id, f"{type(exc).__name__}: {exc}")
             finally:
                 with self._lock:
-                    self._active.discard(box.get("id", ""))
-                announced.set()
+                    self._active.discard(run_id)
+                self._announce(run_id)
 
-        worker = threading.Thread(target=work, daemon=True)
-        with self._lock:
-            # Started before it is listed: an unstarted thread reads as not alive and would be
-            # pruned by a concurrent submit.
-            worker.start()
-            self._workers = [w for w in self._workers if w.is_alive()] + [worker]
-        announced.wait(timeout=60)
-        if "id" not in box:
-            raise RuntimeError(box.get("error", "the Run did not start"))
-        return box["id"]
+        try:
+            self.queue.submit(run_id, work)
+        except QueueClosed:
+            self._mark_failed(run_id, "Cancelled: the app is shutting down.")
+            with self._lock:
+                self._active.discard(run_id)
+            raise SubmitError("the app is shutting down", HTTPStatus.SERVICE_UNAVAILABLE) from None
+        return run_id
 
-    def _mark_failed(self, run_id: str | None, error: str) -> None:
-        """A Run that crashed after it was listed as running must not stay running forever."""
-        if not run_id:
+    def _announce(self, run_id: str) -> None:
+        if self.on_finished is None:
             return
         try:
             entry = next(e for e in history.load_entries(self.home) if e.id == run_id)
-            history.upsert(self.home, dataclasses.replace(entry, status="failed"))
-            folder = self.run_folder(run_id)
-            if folder is not None:
-                with open(folder / "agent.log", "a", encoding="utf-8") as log:
-                    log.write(f"\nERROR: {error}\n")
-        except (StopIteration, OSError):
+            self.on_finished(FinishedRun(run_id, entry.status, entry.title))
+        except Exception:  # a broken listener must never break the queue
             pass
+
+    def _mark_failed(self, run_id: str | None, error: str) -> None:
+        """A Run that crashed after it was listed must not stay queued or running forever."""
+        if run_id:
+            fail_run(self.home, run_id, error)
 
     def run_folder(self, run_id: str) -> Path | None:
         """The folder of a Run, or None for an id that is not a plain child of `runs/`."""
@@ -448,6 +469,9 @@ class _Handler(BaseHTTPRequestHandler):
                 apply_filters(entries, filters), filters, self.app.active_ids(), len(entries)
             )
             self._send(HTTPStatus.OK, page.encode(), "text/html; charset=utf-8")
+            return
+        if url.path == "/capture":
+            self._send(HTTPStatus.OK, capture_page().encode(), "text/html; charset=utf-8")
             return
         match = re.fullmatch(r"/runs/([^/]+)(?:/(.*))?", url.path)
         if not match:

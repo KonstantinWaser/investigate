@@ -512,7 +512,7 @@ def test_concurrent_submits_are_all_tracked(home):
         for t in threads:
             t.join(30)
         assert len(ids) == count
-        assert len(srv._workers) == count
+        assert srv.active_ids() == set(ids) and len(set(ids)) == count
     finally:
         runner.release.set()
         assert srv.wait_for_runs()

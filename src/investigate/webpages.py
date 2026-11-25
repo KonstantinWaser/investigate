@@ -34,6 +34,7 @@ th,td{text-align:left;padding:.45rem .5rem;border-bottom:1px solid var(--line);\
 vertical-align:top}
 th{color:var(--muted);font-weight:600;font-size:.8rem;text-transform:uppercase}
 .running{color:var(--run);font-weight:600}
+.queued{color:var(--muted);font-style:italic}
 .muted{color:var(--muted)}
 .empty{padding:2rem;text-align:center;color:var(--muted);background:var(--card);\
 border-radius:.5rem}
@@ -133,7 +134,11 @@ def _verdict_cell(e: HistoryEntry) -> str:
 
 def _row(e: HistoryEntry, active: Collection[str]) -> str:
     rid = escape(e.id, quote=True)
-    status = '<span class="running">running</span>' if e.status == "running" else escape(e.status)
+    status = (
+        f'<span class="{e.status}">{e.status}</span>'
+        if e.status in ("running", "queued")
+        else escape(e.status)
+    )
     if e.id in active:
         action = '<span class="muted">in progress</span>'
     else:
@@ -160,7 +165,7 @@ def history_page(
 ) -> str:
     refresh = (
         '<meta http-equiv="refresh" content="5">'
-        if any(e.status == "running" for e in entries)
+        if any(e.status in ("running", "queued") for e in entries)
         else ""
     )
     if entries:

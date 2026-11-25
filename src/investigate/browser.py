@@ -132,15 +132,27 @@ def _kill_tree(proc: subprocess.Popen) -> None:
     kill(proc)
 
 
+_login_procs: set[subprocess.Popen] = set()
+
+
+def stop_login() -> None:
+    """Close a login Chrome that is still open (the tray is quitting). `login` then returns
+    without writing the marker."""
+    for proc in list(_login_procs):
+        _kill_tree(proc)
+
+
 def _launch_and_wait(profile: Path, urls: list[str]) -> int:
     exe = _find_chrome()
     if exe is None:
         print("error: Google Chrome was not found. Install it to log in.", file=sys.stderr)
         return 1
     proc = subprocess.Popen([exe, f"--user-data-dir={profile}", "--no-first-run", *urls])  # noqa: S603
+    _login_procs.add(proc)
     try:
         return proc.wait()
     finally:
+        _login_procs.discard(proc)
         # Ctrl+C, or a chrome.exe that handed off and exited: never leave a window on the
         # profile after the lock is released.
         _kill_tree(proc)
