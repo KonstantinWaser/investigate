@@ -261,3 +261,29 @@ def test_cli_setup_command_is_wired(home, monkeypatch):
     monkeypatch.setattr(cli, "run_setup", lambda h, io=None: seen.append(h) or 0)
     assert cli.main(["setup"]) == 0
     assert seen == [home]
+
+
+def test_quoted_context_path_from_explorer_is_accepted(home, tmp_path):
+    notes = tmp_path / "work.md"
+    notes.write_text("x", encoding="utf-8")
+    run_setup(home, FakeIO([f'"{notes}"', ""]).build())
+    assert [c.path for c in load_config(home).contexts] == [str(notes.resolve())]
+
+
+def test_unusable_context_path_is_reported_and_setup_carries_on(home, tmp_path):
+    blocker = tmp_path / "afile"
+    blocker.write_text("x", encoding="utf-8")
+    bad = blocker / "sub" / "work.md"  # a folder cannot be made under a file
+    io = FakeIO([str(bad), "y", ""])
+    assert run_setup(home, io.build()) == 0
+    assert "Could not" in io.output
+    assert load_config(home).contexts == ()
+    assert "Next" in io.output
+
+
+def test_context_file_with_a_blank_name_is_reported_not_raised(home, tmp_path):
+    odd = tmp_path / " .md"
+    odd.write_text("x", encoding="utf-8")
+    io = FakeIO([str(odd), ""])
+    assert run_setup(home, io.build()) == 0
+    assert load_config(home).contexts == ()

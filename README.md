@@ -2,7 +2,7 @@
 
 A personal research desk. You paste text, links, files or images (or save an Instagram Collection or a YouTube playlist), an agent CLI researches or fact-checks it in depth, and you get a cited HTML Report that relates the findings to your own projects.
 
-Runs happen on your machine through the Claude Code CLI. Nothing is sent anywhere except what that CLI and the agent's web searches send. MIT licensed. The vocabulary (Item, Run, Report, Depth, Context, Inbox, Verdict) is in `GLOSSARY.md`, the agreed design in `docs/design.md`, what exists elsewhere in `docs/prior-art.md`, and how to add another agent CLI in `docs/runner.md`.
+Runs happen on your machine through the Claude Code CLI. It has no server of its own: the only traffic is from the CLI and the agent (model calls, web search and fetch), plus the Inbox sources you configure (yt-dlp for YouTube, the browser profile for Instagram). MIT licensed. The vocabulary (Item, Run, Report, Depth, Context, Inbox, Verdict) is in `GLOSSARY.md`, the agreed design in `docs/design.md`, what exists elsewhere in `docs/prior-art.md`, and how to add another agent CLI in `docs/runner.md`.
 
 ## Contents
 
@@ -169,9 +169,10 @@ The quick-capture hotkey is `ctrl+alt+i` by default (`hotkey` in `config.toml`, 
 The author uses and tests Windows 11. The macOS and Linux paths are written to the platform documentation and covered by headless tests with fakes, but have not been run on real machines. Expect rough edges and please report them.
 
 - **macOS tray**: `pystray` must run on the main thread there, and `investigate tray` runs it on the main thread. Known limits: the icon and title are updated from a worker thread, which AppKit prefers on the main thread, and Ctrl+C skips the orderly shutdown, so leave with Quit from the menu. Toasts are pystray's plain notification, with no click-through to the Report (only Windows has that); open the Report from the History page.
-- **macOS hotkey**: `pynput` needs Accessibility and Input Monitoring permission for the app that starts it (Terminal, or your Python). Grant them under System Settings, Privacy and Security, then restart the tray. Without them the hotkey does nothing and a notice says so.
+- **macOS hotkey**: `pynput` needs Accessibility and Input Monitoring permission for the app that starts it (Terminal, or your Python). Grant them under System Settings, Privacy and Security, then restart the tray. Without them the listener can start yet receive no keys, and no notice appears.
 - **Linux tray**: needs an AppIndicator or StatusNotifier host. GNOME shows no tray icons without an extension such as AppIndicator support; KDE and most other desktops do.
-- **Linux hotkey**: global hotkeys through `pynput` work on X11. On Wayland the compositor does not allow applications to grab global keys, so the hotkey will not fire; use the tray icon, or bind a desktop shortcut to a command that opens `http://127.0.0.1:8765/capture`.- **Chrome login**: needs Google Chrome in a standard location; `investigate login` says so when it is missing.
+- **Linux hotkey**: global hotkeys through `pynput` work on X11. On Wayland the compositor does not allow applications to grab global keys, so the hotkey will not fire; use the tray icon, or bind a desktop shortcut to a command that opens `http://127.0.0.1:8765/capture`.
+- **Chrome login**: needs Google Chrome in a standard location; `investigate login` says so when it is missing.
 - **Start at login**: LaunchAgents are read at the next login, XDG autostart needs a desktop that honours it.
 
 ## 11. Terms of service risk

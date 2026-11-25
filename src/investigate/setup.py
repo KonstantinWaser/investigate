@@ -189,7 +189,7 @@ def _contexts(io: SetupIO, home: Path, config: Config) -> Config:
         text = _ask_text(io, "Path to a Context file to add (Enter to finish): ")
         if not text:
             return config
-        path = Path(text).expanduser().resolve()
+        path = Path(text.strip("\"'")).expanduser().resolve()  # Explorer quotes copied paths
         if any(Path(c.path) == path for c in config.contexts):
             io.say(f"{path} is already listed.")
             continue
@@ -197,21 +197,25 @@ def _contexts(io: SetupIO, home: Path, config: Config) -> Config:
         if any(c.name == name for c in config.contexts):
             io.say(f"A Context named {name!r} exists. Rename the file or edit config.toml.")
             continue
-        if not path.exists():
-            if not _confirm(io, f"{path} does not exist. Create a starter file there?"):
-                io.say("Not added.")
+        try:
+            if not path.exists():
+                if not _confirm(io, f"{path} does not exist. Create a starter file there?"):
+                    io.say("Not added.")
+                    continue
+                path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with open(path, "x", encoding="utf-8") as handle:  # never replaces a file
+                        handle.write(STARTER_CONTEXT)
+                except FileExistsError:
+                    pass
+                io.say(f"Created {path}. Edit it to describe your work.")
+            elif not path.is_file():
+                io.say(f"{path} is not a file.")
                 continue
-            path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                with open(path, "x", encoding="utf-8") as handle:  # never replaces a file
-                    handle.write(STARTER_CONTEXT)
-            except FileExistsError:
-                pass
-            io.say(f"Created {path}. Edit it to describe your work.")
-        elif not path.is_file():
-            io.say(f"{path} is not a file.")
+            config = _add_context(home, name, path)
+        except (OSError, ConfigError) as exc:
+            io.say(f"Could not add {path}: {exc}")
             continue
-        config = _add_context(home, name, path)
         io.say(f"Added Context {name!r}.")
 
 

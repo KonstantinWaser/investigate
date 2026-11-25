@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ DENYLIST_ENV = "INVESTIGATE_DENYLIST"
 
 # Folder names after a user-home prefix that are placeholders, not people.
 PLACEHOLDER_USERS = {
+    "...",
     "you",
     "user",
     "users",
@@ -48,8 +50,8 @@ PLACEHOLDER_EMAIL_DOMAINS = {
 _NAME = r"([^\s\\/:*?\"<>|`'\]\)]+)"
 HOME_PATTERNS = [
     re.compile(r"[A-Za-z]:[\\/]+Users[\\/]+" + _NAME, re.I),
-    re.compile(r"(?<![\w.])/Users/" + _NAME),
-    re.compile(r"(?<![\w.])/home/" + _NAME),
+    re.compile(r"(?:(?<![\w.])|(?<=/[A-Za-z]))/Users/" + _NAME),
+    re.compile(r"(?:(?<![\w.])|(?<=/[A-Za-z]))/home/" + _NAME),
 ]
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})\b")
 EMAIL_LOCAL_PLACEHOLDERS = {"noreply", "no-reply"}
@@ -94,7 +96,7 @@ def load_denylist(path: str | None) -> list[str]:
 
 def tracked_texts() -> dict[str, str]:
     names = subprocess.run(
-        ["git", "ls-files", "-z"],  # noqa: S607
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],  # noqa: S607
         cwd=ROOT,
         capture_output=True,
         check=True,
@@ -171,3 +173,20 @@ def test_without_the_env_var_the_denylist_is_empty():
 def test_the_licence_is_exempt_from_the_denylist_only():
     assert find_problems("LICENSE", "Copyright Somebody", ["somebody"]) == []
     assert find_problems("README.md", "Copyright Somebody", ["somebody"])
+
+
+def test_scanner_flags_git_bash_wsl_and_permission_rule_spellings():
+    assert find_problems("f", "/c" + MAC_HOME + "jsmith/x")
+    assert find_problems("f", "/mnt/c" + MAC_HOME + "jsmith/x")
+    assert find_problems("f", "//c" + MAC_HOME + "jsmith/x")
+    assert find_problems("f", "//c" + MAC_HOME + "...") == []
+
+
+def test_tracked_texts_include_new_files_that_are_not_committed_yet(tmp_path, monkeypatch):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    for args in (["init", "-q"], ["config", "user.email", "t@example.com"]):
+        subprocess.run(["git", *args], cwd=repo, check=True)  # noqa: S607
+    (repo / "new.md").write_text("hello", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", repo)
+    assert "new.md" in tracked_texts()
