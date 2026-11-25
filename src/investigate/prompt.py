@@ -37,6 +37,21 @@ Method (follow it in order):
 high, medium or low. A claim without a citation is low confidence and says so.
 6. Do not invent URLs, quotes or versions. If you could not verify something, say so."""
 
+_BROWSER_ON = (
+    "Logged-in browser. Playwright browser tools (mcp__playwright__*) drive a browser that is "
+    "logged in to YouTube, Instagram and X. Use it for logged-in search on those sites when they "
+    "matter for the Item. Rules: read-only on every platform. Never like, follow, subscribe, "
+    "comment, save, post, message or change any setting. Keep volume low: a few searches and "
+    "page views, no scrolling through feeds and no bulk fetching. If a site shows you logged out "
+    "(a login wall or a sign-in button), do not try to log in; skip that site and add a finding "
+    '"Not logged in to <site>" with confidence high, and carry on with the rest.'
+)
+
+_BROWSER_OFF = (
+    "The logged-in browser is not available for this Run. Do not look for it. Use public "
+    "sources only."
+)
+
 
 def build_prompt(
     item: str,
@@ -44,6 +59,7 @@ def build_prompt(
     language: str,
     contexts: tuple[tuple[str, Path], ...] = (),
     attachments: tuple[Attachment, ...] = (),
+    browser: bool | None = None,
 ) -> str:
     """`contexts` holds (name, file) pairs in config order."""
     attached = ""
@@ -55,6 +71,9 @@ def build_prompt(
             + listed
             + "\n"
         )
+    browser_section = ""
+    if browser is not None:
+        browser_section = f"\n{_BROWSER_ON if browser else _BROWSER_OFF}\n"
     context = ""
     if contexts:
         listed = "\n".join(f"- {name}: {path}" for name, path in contexts)
@@ -81,7 +100,7 @@ You are a research agent producing one cited Report for the Item below.
 {_DEPTH_GUIDANCE[depth]}
 
 {_METHOD}
-{context}
+{browser_section}{context}
 Output. Write the whole result to the file `{RESULT_FILE}` in the current directory and write \
 nothing else outside this directory. The file is Markdown: a write-up of your findings first, \
 and as the very last thing one fenced JSON block with this shape:
