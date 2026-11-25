@@ -92,6 +92,8 @@ def parse_result(text: str | None) -> ParsedResult:
     body = (text[: last.start()] + text[last.end() :]).strip()
     try:
         data = json.loads(last.group(1))
+    except RecursionError:
+        return ParsedResult(body, None, ("The JSON block is nested too deeply.",))
     except json.JSONDecodeError as exc:
         return ParsedResult(body, None, (f"The JSON block is not valid JSON: {exc}",))
     problems: list[str] = []

@@ -115,7 +115,7 @@ def test_damaged_index_is_set_aside(home):
     home.mkdir()
     (home / "index.json").write_text("{nope", encoding="utf-8")
     _run(home, FakeRunner())
-    assert (home / "index.json.broken").exists()
+    assert len(list(home.glob("index.json.broken*"))) == 1
     assert len(history.load_entries(home)) == 1
 
 

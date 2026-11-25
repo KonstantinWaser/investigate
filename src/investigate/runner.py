@@ -73,17 +73,24 @@ def build_command(command: list[str], request: RunRequest) -> list[str]:
         "--strict-mcp-config",
         "--setting-sources",
         "user",
+        # User-level hooks still load with `--setting-sources user`; switch every hook off.
+        "--settings",
+        json.dumps({"disableAllHooks": True}),
     ]
     if request.model:
         cmd += ["--model", request.model]
     if request.permission_mode is PermissionMode.BYPASS:
         cmd += ["--permission-mode", "bypassPermissions"]
     else:
-        allowed = ["WebSearch", "WebFetch", "Edit(*)", "Write(*)"]
+        run_folder = _rule_path(request.workdir)
+        # Writes are anchored to the run folder with an absolute `//` pattern. Context files are
+        # named one by one, no --add-dir, so the agent cannot read their sibling files. "Agent"
+        # (the subagent tool) is allowed so deep Runs can fan out per source class.
+        # `Edit` rules cover every file-editing tool, Write included; a separate `Write(...)`
+        # rule did not match in practice. The pattern is anchored to the run folder.
+        allowed = ["WebSearch", "WebFetch", "Agent", f"Edit({run_folder}/**)"]
         allowed += [f"Read({_rule_path(p)})" for p in request.context_files]
         cmd += ["--permission-mode", "dontAsk", "--allowedTools", *allowed]
-    for directory in sorted({str(p.resolve().parent) for p in request.context_files}):
-        cmd += ["--add-dir", directory]
     return cmd
 
 

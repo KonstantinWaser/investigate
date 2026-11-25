@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from investigate.config import PermissionMode
-from investigate.runner import ClaudeCodeRunner, RunRequest, build_command
+from investigate.runner import ClaudeCodeRunner, RunRequest, _rule_path, build_command
 
 STUB = str(Path(__file__).with_name("stub_claude.py"))
 
@@ -37,6 +37,7 @@ def test_command_bypass_isolates_mcp_and_settings(tmp_path):
     assert cmd[cmd.index("--mcp-config") + 1] == "mcp.json"
     assert "--strict-mcp-config" in cmd
     assert cmd[cmd.index("--setting-sources") + 1] == "user"
+    assert json.loads(cmd[cmd.index("--settings") + 1]) == {"disableAllHooks": True}
     assert cmd[cmd.index("--permission-mode") + 1] == "bypassPermissions"
     assert "--model" not in cmd
     assert "hello" not in cmd  # the prompt goes in on stdin
@@ -59,7 +60,13 @@ def test_command_allowlist_and_model(tmp_path):
     assert "WebSearch" in allowed and "WebFetch" in allowed
     assert any(a.startswith("Read(//") and a.endswith("me.md)") for a in allowed)
     assert "Bash" not in allowed
-    assert str(ctx.parent.resolve()) in cmd  # --add-dir
+    assert "Agent" in allowed  # deep Runs use subagents
+    assert "--add-dir" not in cmd  # would expose the whole folder of each Context file
+    run_rule = _rule_path(tmp_path)
+    assert f"Edit({run_rule}/**)" in allowed
+    assert not any(a.startswith("Write(") for a in allowed)  # Edit rules cover Write
+    assert "Edit(*)" not in allowed
+    assert f"Read({_rule_path(ctx)})" in allowed
 
 
 def test_runner_success_parses_json_and_session(tmp_path):

@@ -43,7 +43,7 @@ DEFAULT_DEPTHS: dict[Depth, DepthSettings] = {
 class Config:
     permission_mode: PermissionMode = PermissionMode.BYPASS
     language: str = "English"
-    context_files: tuple[str, ...] = ()
+    context_files: tuple[str, ...] = ()  # absolute, resolved by `load_config`
     depths: dict[Depth, DepthSettings] = field(default_factory=lambda: dict(DEFAULT_DEPTHS))
 
 
@@ -80,7 +80,9 @@ model = "opus"
 def data_home() -> Path:
     """The data folder: `$INVESTIGATE_HOME`, else `~/.investigate`."""
     override = os.environ.get(HOME_ENV)
-    return Path(override) if override else Path.home() / ".investigate"
+    base = Path(override) if override else Path.home() / ".investigate"
+    # Resolved so the run folder is spelled the way permission rules are (no 8.3 short names).
+    return base.expanduser().resolve()
 
 
 def config_path(home: Path) -> Path:
@@ -100,6 +102,12 @@ def load_config(home: Path) -> Config:
     return _parse(raw, path)
 
 
+def _resolve(value: str, base: Path) -> str:
+    """Context file path made absolute once: `~` expanded, relative to the data folder."""
+    expanded = Path(value).expanduser()
+    return str((expanded if expanded.is_absolute() else base / expanded).resolve())
+
+
 def _parse(raw: dict, path: Path) -> Config:
     try:
         mode = PermissionMode(raw.get("permission_mode", "bypass"))
@@ -116,7 +124,12 @@ def _parse(raw: dict, path: Path) -> Config:
         raise ConfigError(f"{path}: context_files must be a list of strings")
 
     depths = dict(DEFAULT_DEPTHS)
-    for name, values in (raw.get("depths") or {}).items():
+    raw_depths = raw.get("depths", {})
+    if not isinstance(raw_depths, dict):
+        raise ConfigError(f"{path}: depths must be a table of [depths.quick] and so on")
+    for name, values in raw_depths.items():
+        if not isinstance(values, dict):
+            raise ConfigError(f"{path}: depths.{name} must be a table")
         try:
             depth = Depth(name)
         except ValueError:
@@ -129,4 +142,4 @@ def _parse(raw: dict, path: Path) -> Config:
         if model is not None and not isinstance(model, str):
             raise ConfigError(f"{path}: depths.{name}.model must be a string")
         depths[depth] = DepthSettings(float(minutes), model or None)
-    return Config(mode, language.strip(), tuple(context), depths)
+    return Config(mode, language.strip(), tuple(_resolve(c, path.parent) for c in context), depths)

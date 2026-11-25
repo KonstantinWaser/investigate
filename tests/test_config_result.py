@@ -13,7 +13,7 @@ from tests.fakes import GOOD_RESULT
 
 
 def test_data_home_uses_env_override(home):
-    assert data_home() == home
+    assert data_home() == home.resolve()
 
 
 def test_data_home_defaults_to_dot_investigate(monkeypatch):

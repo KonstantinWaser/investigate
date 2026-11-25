@@ -97,7 +97,7 @@ def execute_run(
     history.upsert(home, entry("running", _item_title(item), session_id))
 
     settings = config.depths[depth]
-    context_files = tuple(Path(p).expanduser() for p in config.context_files)
+    context_files = tuple(Path(p) for p in config.context_files)
     request = RunRequest(
         prompt=build_prompt(item, depth, config.language, context_files),
         workdir=folder,
@@ -113,7 +113,10 @@ def execute_run(
         error = traceback.format_exc()
         outcome = RunnerOutcome(False, False, "", session_id, error, error)
 
-    (folder / "agent.log").write_text(outcome.log or "", encoding="utf-8")
+    log = outcome.log or ""
+    if outcome.error and outcome.error not in log:
+        log += f"\nERROR: {outcome.error}\n"
+    (folder / "agent.log").write_text(log, encoding="utf-8")
     parsed = parse_result(_read_result(folder, outcome))
     if parsed.structured:
         (folder / "result.json").write_text(
