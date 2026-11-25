@@ -18,9 +18,10 @@ Tests use a fake runner and an `INVESTIGATE_HOME` pointing at a temp folder. The
 - `src/investigate/result.py`: parses the agent's structured result (Markdown body plus a JSON block). Never raises.
 - `src/investigate/report.py`: renders the self-contained HTML Report. Escapes all agent text.
 - `src/investigate/attachments.py`: copies, sanitises and size-checks an Item's files and images into `<run folder>/attachments/`. Takes paths or in-memory `Upload`s.
-- `src/investigate/history.py`: the History index (`index.json` in the data folder).
 - `src/investigate/browser.py`: the persistent browser profile (`browser-profile/` in the data folder), the Playwright MCP server entry and `login`.
 - `src/investigate/profile_lock.py`: the cross-process lock on that profile. Anything that opens the profile holds it.
+- `src/investigate/history.py`: the History index (`index.json` in the data folder). New `HistoryEntry` fields need a default so old indexes keep loading; unknown keys are preserved on rewrite.
+- `src/investigate/server.py`, `webpages.py`: the localhost History and Report server (stdlib `http.server`; `HistoryServer` starts and stops from code; `investigate serve`). Loopback only unless `--allow-remote`; POST and DELETE check Host and Origin.
 - `src/investigate/service.py`: `execute_run`, the one path that turns an Item into a run folder.
 - `src/investigate/cli.py`: the `investigate` entry point.
 

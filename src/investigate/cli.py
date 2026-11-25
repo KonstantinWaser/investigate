@@ -11,6 +11,7 @@ from investigate import browser, history
 from investigate.attachments import AttachmentError
 from investigate.config import ConfigError, Depth, data_home, load_config
 from investigate.runner import ClaudeCodeRunner, Runner
+from investigate.server import DEFAULT_PORT, HistoryServer
 from investigate.service import execute_run
 
 
@@ -36,6 +37,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("history", help="List past Runs.")
     sub.add_parser("login", help="Open the browser profile to log in to YouTube, Instagram, X.")
+    serve = sub.add_parser("serve", help="Serve the History and Reports on localhost.")
+    serve.add_argument("--host", default="127.0.0.1", help="Address to bind (default 127.0.0.1).")
+    serve.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port (default 8765).")
+    serve.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow binding a non-local address. Anyone who can reach it can read and delete.",
+    )
     return parser
 
 
@@ -49,6 +58,22 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
 
     if args.command == "login":
         return browser.login(home)
+    if args.command == "serve":
+        try:
+            server = HistoryServer(
+                home,
+                runner or ClaudeCodeRunner(),
+                host=args.host,
+                port=args.port,
+                allow_remote=args.allow_remote,
+            )
+            server.start()
+        except (ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"History at {server.url} (Ctrl+C to stop)", flush=True)
+        server.serve_forever()
+        return 0
 
     try:
         config = load_config(home)
