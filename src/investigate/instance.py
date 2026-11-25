@@ -93,14 +93,17 @@ def _run_alive(home: Path, run_id: str) -> bool:
         pid = int((home / "runs" / run_id / "running.pid").read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return False
-    return _pid_alive(pid)
+    # Under the lock this process has started nothing yet, so a pid equal to ours is a dead
+    # host's pid that this one reused, not a Run in progress.
+    return pid != os.getpid() and _pid_alive(pid)
 
 
 def recover_interrupted(home: Path) -> list[str]:
     """Mark Runs left `queued` or `running` by a hard kill (Task Manager, logoff, shutdown) as
     failed. Call it only while holding the instance lock: no host can still be working on a
-    queued Run, and a running one is spared only when a live process (an `investigate run` in
-    another terminal) wrote its pid. Returns the ids it fixed."""
+    queued Run, and a running one is spared only when another live process (an `investigate
+    run` in another terminal) wrote its pid. Call it before the server takes Runs. Returns the ids
+    it fixed."""
     fixed = []
     for entry in history.load_entries(home):
         if entry.status == "queued" or (

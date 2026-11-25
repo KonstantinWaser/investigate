@@ -26,9 +26,11 @@ Tests use a fake runner and an `INVESTIGATE_HOME` pointing at a temp folder. The
 - `src/investigate/service.py`: `execute_run`, the one path that turns an Item into a run folder. `reserve_run` makes the folder and lists the Run as `queued` first. A crash after the Run is listed leaves it `failed`.
 - `src/investigate/runqueue.py`: FIFO queue with the parallel limit (`parallel_runs` in `config.toml`, 1 to 3). `HistoryServer.submit` goes through it, so `serve` and the tray share it.
 - `src/investigate/capture.py`: the quick-capture page (`/capture`). Paste and drop are handled by the page, submit goes to `POST /api/runs`.
-- `src/investigate/instance.py`: the cross-process host lock (`tray.lock`, `tray.json`) in the data folder; the tray and `serve` both take it. `recover_interrupted` runs under it at start-up and fails Runs a hard kill left `queued` or `running` (a live `running.pid` in the run folder spares a Run).
+- `src/investigate/instance.py`: the cross-process host lock (`tray.lock`, `tray.json`) in the data folder; the tray and `serve` both take it. `recover_interrupted` runs under it at start-up, before the server listens, and fails Runs a hard kill left `queued` or `running` (a live `running.pid` of another process in the run folder spares a Run; this host's own pid does not, and `execute_run` removes the file when a Run ends).
 - `src/investigate/tray.py`: `TrayApp` (menu as data, toasts, quit) and `run_tray`. No GUI imports; tested headless.
 - `src/investigate/tray_gui.py`: the only file that imports pystray, Pillow and winotify (the `tray` extra). Keep it thin.
+- `src/investigate/settings.py`, `settingspage.py`: the Settings page (`/settings`). `settings.py` has the field list (`SECTIONS`), form parsing and the comment-preserving, atomic write (`tomlkit`). Validation is `config.validate_raw`, the same code `load_config` runs. A new setting: its rule in `validate_raw`, its default in `DEFAULT_CONFIG_TOML`, one `Field` in `SECTIONS`. The page is script-free (CSP by hash for its style).
+- `src/investigate/hotkeys.py`: the `HotkeyBackend` seam; `RegisterHotKey` on Windows, `pynput` elsewhere. `autostart.py`: the `Autostart` seam (Run registry key, LaunchAgent, XDG file). Tests use fakes or temp folders and never the real registry, Startup folder or home.
 - `src/investigate/cli.py`: the `investigate` entry point.
 
 ## Rules

@@ -32,15 +32,24 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from investigate import history
 from investigate.attachments import AttachmentError, Upload, check_attachments
 from investigate.capture import capture_csp, capture_page
-from investigate.config import ConfigError, Depth, load_config
+from investigate.config import Config, ConfigError, Depth, load_config, validate_raw
 from investigate.followup import FollowupError, FollowupManager
 from investigate.runner import Runner
 from investigate.runqueue import QueueClosed, RunQueue
 from investigate.service import execute_run, fail_run, reserve_run
+from investigate.settings import (
+    SaveResult,
+    read_raw,
+    save_settings,
+    state_from_form,
+    state_from_raw,
+)
+from investigate.settingspage import settings_csp, settings_page
 from investigate.webpages import Filters, apply_filters, history_page
 
 DEFAULT_PORT = 8765
 MAX_FILES = 10  # per submission
+SETTINGS_BODY_CAP = 256 * 1024  # the Settings form is a few KB of text
 BODY_MARGIN = 1024 * 1024  # room for the text, URLs and multipart framing
 ATTACHMENTS_DIR = "attachments"
 _INLINE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
@@ -156,6 +165,7 @@ class HistoryServer:
         allow_remote: bool = False,
         max_parallel: int | None = None,
         on_finished: Callable[[FinishedRun], None] | None = None,
+        on_config_changed: Callable[[Config], None] | None = None,
     ) -> None:
         if not allow_remote and not is_loopback(host):
             raise ValueError(
@@ -174,6 +184,10 @@ class HistoryServer:
         limit = max_parallel if max_parallel is not None else load_config(home).parallel_runs
         self.queue = RunQueue(limit)
         self.on_finished = on_finished
+        # Called with the new Config after Settings saved it. The queue is already resized.
+        self.on_config_changed = on_config_changed
+        self._limit_pinned = max_parallel is not None
+        self._settings_lock = threading.Lock()
         self._connections: set[socket.socket] = set()
         self._ops = threading.RLock()  # delete and Follow-up start check and act as one step
         self.followups = FollowupManager(home, runner, queue=self.queue, ops=self._ops)
@@ -260,6 +274,23 @@ class HistoryServer:
         self.queue.wait_idle(30)
 
     # actions
+
+    def save_settings(self, form: dict[str, list[str]]) -> SaveResult:
+        """Validate and write the Settings form. What applies without a restart is applied here:
+        the parallel limit resizes the live queue, and `on_config_changed` tells the tray (hotkey,
+        start at login). Everything else is read from the file when it is next needed."""
+        with self._settings_lock:
+            result = save_settings(self.home, form)
+            if result.config is None:
+                return result
+            if not self._limit_pinned:
+                self.queue.set_limit(result.config.parallel_runs)
+            if self.on_config_changed is not None:
+                try:
+                    self.on_config_changed(result.config)
+                except Exception:  # a broken listener must not turn a saved file into an error
+                    pass
+            return result
 
     def active_ids(self) -> set[str]:
         with self._lock:
@@ -463,12 +494,12 @@ class _Handler(BaseHTTPRequestHandler):
             max_bytes = 25 * 1_048_576
         return max_bytes * MAX_FILES + BODY_MARGIN
 
-    def _read_body(self) -> bytes | None:
+    def _read_body(self, cap: int | None = None) -> bytes | None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = -1
-        if length < 0 or length > self._body_cap():
+        if length < 0 or length > (cap if cap is not None else self._body_cap()):
             self.close_connection = True
             self._text(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "body too large or length invalid")
             return None
@@ -499,6 +530,9 @@ class _Handler(BaseHTTPRequestHandler):
                 "text/html; charset=utf-8",
                 {"Content-Security-Policy": "frame-ancestors 'none'"},
             )
+            return
+        if url.path == "/settings":
+            self._settings_get(parse_qs(url.query))
             return
         if url.path == "/capture":
             self._send(
@@ -557,7 +591,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._guard(state_changing=True):
             return
         path = urlsplit(self.path).path
-        body = self._read_body()
+        body = self._read_body(SETTINGS_BODY_CAP if path == "/settings" else None)
         if body is None:
             return
         if path == "/api/runs":
@@ -572,6 +606,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             else:
                 self._json(HTTPStatus.ACCEPTED, {"id": run_id})
+            return
+        if path == "/settings":
+            self._settings_post(body)
             return
         match = re.fullmatch(r"/runs/([^/]+)/followup", path)
         if match:
@@ -617,6 +654,46 @@ class _Handler(BaseHTTPRequestHandler):
                 self._redirect(f"/runs/{run_id}/")
             else:
                 self._json(HTTPStatus.ACCEPTED, {"id": run_id})
+
+    def _settings_html(self, status: int, page: str) -> None:
+        self._send(
+            status,
+            page.encode(),
+            "text/html; charset=utf-8",
+            {"Content-Security-Policy": settings_csp()},
+        )
+
+    def _settings_get(self, query: dict) -> None:
+        try:
+            raw = read_raw(self.app.home)
+        except ConfigError as exc:
+            self._settings_html(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                settings_page(state_from_raw({}), {}, problem=f"Settings cannot open: {exc}"),
+            )
+            return
+        errors = validate_raw(raw, self.app.home)[1]
+        self._settings_html(
+            HTTPStatus.OK,
+            settings_page(state_from_raw(raw), errors, saved="saved" in query),
+        )
+
+    def _settings_post(self, body: bytes) -> None:
+        form = parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True)
+        try:
+            result = self.app.save_settings(form)
+        except (ConfigError, OSError) as exc:
+            self._settings_html(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                settings_page(state_from_form(form), {}, problem=f"Nothing was saved: {exc}"),
+            )
+            return
+        if result.config is None:
+            self._settings_html(
+                HTTPStatus.UNPROCESSABLE_ENTITY, settings_page(result.state, result.errors)
+            )
+        else:
+            self._redirect("/settings?saved=1")
 
     def _delete(self, run_id: str, *, redirect: bool) -> None:
         result = self.app.delete(run_id)

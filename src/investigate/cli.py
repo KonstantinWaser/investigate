@@ -9,7 +9,9 @@ from pathlib import Path
 
 from investigate import browser, history
 from investigate.attachments import AttachmentError
+from investigate.autostart import default_autostart
 from investigate.config import ConfigError, Depth, data_home, load_config
+from investigate.hotkeys import default_hotkeys
 from investigate.instance import InstanceLock, recover_interrupted, running_url
 from investigate.runner import ClaudeCodeRunner, Runner
 from investigate.server import DEFAULT_PORT, HistoryServer
@@ -70,11 +72,11 @@ def _serve(home: Path, args: argparse.Namespace, runner: Runner) -> int:
                 port=args.port,
                 allow_remote=args.allow_remote,
             )
+            recover_interrupted(home)  # before the server listens: see run_tray
             server.start()
         except (ValueError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
-        recover_interrupted(home)
         lock.publish(server.url)
         print(f"History at {server.url} (Ctrl+C to stop)", flush=True)
         server.serve_forever()
@@ -102,7 +104,14 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
                 file=sys.stderr,
             )
             return 2
-        return run_tray(home, runner or ClaudeCodeRunner(), tray_gui.run, port=args.port)
+        return run_tray(
+            home,
+            runner or ClaudeCodeRunner(),
+            tray_gui.run,
+            port=args.port,
+            hotkeys=default_hotkeys(),
+            autostart=default_autostart(),
+        )
     if args.command == "serve":
         return _serve(home, args, runner or ClaudeCodeRunner())
 

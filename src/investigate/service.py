@@ -9,7 +9,7 @@ import shutil
 import traceback
 import uuid
 from collections.abc import Sequence
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -144,6 +144,11 @@ def execute_run(
         for run_id in started:
             fail_run(home, run_id, f"{type(exc).__name__}: {exc}")
         raise
+    finally:
+        # The pid only says a live process is working on this Run; once it ends it is stale.
+        for run_id in started:
+            with suppress(OSError):
+                (home / "runs" / run_id / "running.pid").unlink()
 
 
 def _execute_run(
