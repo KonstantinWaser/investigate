@@ -23,6 +23,7 @@ from investigate.instance import InstanceLock, recover_interrupted, running_url
 from investigate.runner import ClaudeCodeRunner, Runner
 from investigate.server import DEFAULT_PORT, HistoryServer
 from investigate.service import execute_run
+from investigate.setup import run_setup
 from investigate.tray import run_tray
 
 
@@ -51,6 +52,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Fact-check the videos newly saved in your YouTube playlist (see config.toml).",
     )
     sub.add_parser("history", help="List past Runs.")
+    sub.add_parser("setup", help="Guided first-time setup. Safe to run again.")
     sub.add_parser("login", help="Open the browser profile to log in to YouTube, Instagram, X.")
     tray = sub.add_parser("tray", help="Run the tray app: icon, quick capture and the server.")
     tray.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port (default 8765).")
@@ -171,6 +173,8 @@ def main(
             runner or ClaudeCodeRunner(),
             inbox_sources or (lambda config: default_sources(config, home)),
         )
+    if args.command == "setup":
+        return run_setup(home)
     if args.command == "login":
         return browser.login(home)
     if args.command == "tray":

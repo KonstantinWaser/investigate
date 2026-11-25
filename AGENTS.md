@@ -10,6 +10,8 @@ uv run ruff check . && uv run ruff format --check . && uv run pytest
 
 Tests use a fake runner and an `INVESTIGATE_HOME` pointing at a temp folder. They need no network and no Claude login. Never let a test touch the real home folder.
 
+`tests/test_no_personal_data.py` scans tracked files for user-home paths and email addresses. Set `INVESTIGATE_DENYLIST` to a file outside the repo (one word per line) to also check your own name; never commit such words.
+
 ## Layout
 
 - `src/investigate/config.py`: data folder (`INVESTIGATE_HOME`, default `~/.investigate`) and `config.toml`.
@@ -36,7 +38,9 @@ Tests use a fake runner and an `INVESTIGATE_HOME` pointing at a temp folder. The
 - `src/investigate/instagram.py`: the Instagram source: Collection parsing and paging (`InstagramApi` on a `get_json` seam, tested on fixtures in `tests/fixtures/instagram/`), `browser_reader` (profile lock, `LoginRequired`, `SourceBusy`) and `InstagramSource`. Playwright is the optional `instagram` extra.
 - `src/investigate/youtube.py`, `transcribe.py`: the YouTube source behind a `YouTubeClient` seam (yt-dlp; tests use a fake and never touch the network) and the optional ffmpeg plus faster-whisper `Transcriber`.
 - `src/investigate/inbox_timer.py`: `InboxScheduler`, the tray's twice-a-day timer with catch-up and an injected clock.
+- `src/investigate/setup.py`: `investigate setup`, the guided first run. Every outside effect is a `SetupIO` field so tests use fakes; it never overwrites an existing config or Context file.
 - `src/investigate/cli.py`: the `investigate` entry point.
+- `docs/runner.md`: the contract for a new agent CLI adapter. `tests/test_runner_contract.py` fails when it drifts from `runner.py`; change both together.
 
 ## Rules
 
