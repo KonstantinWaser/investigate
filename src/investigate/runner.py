@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -116,6 +117,10 @@ def _kill_tree(proc: subprocess.Popen) -> None:
     proc.kill()
 
 
+def log_of(argv: list[str], stdout: str, stderr: str) -> str:
+    return f"$ {' '.join(argv)}\n\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n"
+
+
 class ClaudeCodeRunner:
     """Claude Code headless: `claude -p` with JSON output. No `--bare` (it ignores login)."""
 
@@ -123,6 +128,18 @@ class ClaudeCodeRunner:
 
     def __init__(self, command: list[str] | None = None) -> None:
         self._command = command
+        self._lock = threading.Lock()
+        self._procs: set[subprocess.Popen] = set()
+        self._stopped = False
+
+    def stop(self) -> None:
+        """End every running agent (and its children) and refuse to start more. A Run stopped
+        this way comes back as partial, like one that hit its timeout."""
+        with self._lock:
+            self._stopped = True
+            procs = list(self._procs)
+        for proc in procs:
+            _kill_tree(proc)
 
     def _resolve(self) -> list[str] | None:
         if self._command is not None:
@@ -165,6 +182,11 @@ class ClaudeCodeRunner:
                 False, False, "", request.session_id, "", f"Could not start the runner: {exc}"
             )
 
+        with self._lock:
+            self._procs.add(proc)
+            stopped_early = self._stopped
+        if stopped_early:
+            _kill_tree(proc)
         timed_out = False
         try:
             stdout, stderr = proc.communicate(request.prompt, timeout=request.timeout_seconds)
@@ -172,8 +194,19 @@ class ClaudeCodeRunner:
             timed_out = True
             _kill_tree(proc)
             stdout, stderr = proc.communicate()
+        finally:
+            with self._lock:
+                self._procs.discard(proc)
         stdout, stderr = stdout or "", stderr or ""
-        log = f"$ {' '.join(argv)}\n\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n"
+        if self._stopped and proc.returncode != 0 and not timed_out:
+            return RunnerOutcome(
+                ok=True,
+                timed_out=True,  # partial: keeps what the agent had written
+                text=_final_text(stdout),
+                session_id=request.session_id,
+                log=log_of(argv, stdout, stderr) + "\nStopped because the app was quit.\n",
+            )
+        log = log_of(argv, stdout, stderr)
 
         if timed_out:
             return RunnerOutcome(

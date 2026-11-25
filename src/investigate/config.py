@@ -11,6 +11,9 @@ from pathlib import Path
 HOME_ENV = "INVESTIGATE_HOME"
 
 
+MAX_PARALLEL_RUNS = 3
+
+
 class ConfigError(ValueError):
     """The config file is unreadable or holds an invalid value."""
 
@@ -53,6 +56,7 @@ class Config:
     depths: dict[Depth, DepthSettings] = field(default_factory=lambda: dict(DEFAULT_DEPTHS))
     max_attachment_mb: float = 25.0  # size limit per attached file or image
     browser: bool = False  # give Runs the logged-in browser profile
+    parallel_runs: int = 2  # Runs at once; the rest wait as `queued`
 
     @property
     def context_files(self) -> tuple[str, ...]:
@@ -84,6 +88,9 @@ max_attachment_mb = 25
 
 # Give Runs the logged-in browser (run `investigate login` once first).
 browser = false
+
+# How many Runs go at once (1 to 3). More wait in the queue.
+parallel_runs = 2
 
 # Wall-clock limit and model per Depth. An empty model means the CLI default.
 [depths.quick]
@@ -175,6 +182,12 @@ def _parse(raw: dict, path: Path) -> Config:
     if not isinstance(browser, bool):
         raise ConfigError(f"{path}: browser must be true or false")
 
+    parallel = raw.get("parallel_runs", 2)
+    if isinstance(parallel, bool) or not isinstance(parallel, int):
+        raise ConfigError(f"{path}: parallel_runs must be a whole number")
+    if not 1 <= parallel <= MAX_PARALLEL_RUNS:
+        raise ConfigError(f"{path}: parallel_runs must be between 1 and {MAX_PARALLEL_RUNS}")
+
     depths = dict(DEFAULT_DEPTHS)
     raw_depths = raw.get("depths", {})
     if not isinstance(raw_depths, dict):
@@ -194,4 +207,4 @@ def _parse(raw: dict, path: Path) -> Config:
         if model is not None and not isinstance(model, str):
             raise ConfigError(f"{path}: depths.{name}.model must be a string")
         depths[depth] = DepthSettings(float(minutes), model or None)
-    return Config(mode, language.strip(), contexts, depths, float(max_mb), browser)
+    return Config(mode, language.strip(), contexts, depths, float(max_mb), browser, parallel)

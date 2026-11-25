@@ -10,9 +10,11 @@ from pathlib import Path
 from investigate import browser, history
 from investigate.attachments import AttachmentError
 from investigate.config import ConfigError, Depth, data_home, load_config
+from investigate.instance import InstanceLock, recover_interrupted, running_url
 from investigate.runner import ClaudeCodeRunner, Runner
 from investigate.server import DEFAULT_PORT, HistoryServer
 from investigate.service import execute_run
+from investigate.tray import run_tray
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -37,6 +39,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("history", help="List past Runs.")
     sub.add_parser("login", help="Open the browser profile to log in to YouTube, Instagram, X.")
+    tray = sub.add_parser("tray", help="Run the tray app: icon, quick capture and the server.")
+    tray.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port (default 8765).")
     serve = sub.add_parser("serve", help="Serve the History and Reports on localhost.")
     serve.add_argument("--host", default="127.0.0.1", help="Address to bind (default 127.0.0.1).")
     serve.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port (default 8765).")
@@ -46,6 +50,37 @@ def _parser() -> argparse.ArgumentParser:
         help="Allow binding a non-local address. Anyone who can reach it can read and delete.",
     )
     return parser
+
+
+def _serve(home: Path, args: argparse.Namespace, runner: Runner) -> int:
+    """`serve` is a host like the tray: one per data folder, and it repairs Runs a hard kill
+    left behind before it takes new ones."""
+    lock = InstanceLock(home)
+    if not lock.acquire():
+        url = running_url(home)
+        where = f" at {url}" if url else ""
+        print(f"error: investigate is already running{where}", file=sys.stderr)
+        return 1
+    try:
+        try:
+            server = HistoryServer(
+                home,
+                runner,
+                host=args.host,
+                port=args.port,
+                allow_remote=args.allow_remote,
+            )
+            server.start()
+        except (ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        recover_interrupted(home)
+        lock.publish(server.url)
+        print(f"History at {server.url} (Ctrl+C to stop)", flush=True)
+        server.serve_forever()
+        return 0
+    finally:
+        lock.release()
 
 
 def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int:
@@ -58,22 +93,18 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
 
     if args.command == "login":
         return browser.login(home)
-    if args.command == "serve":
+    if args.command == "tray":
         try:
-            server = HistoryServer(
-                home,
-                runner or ClaudeCodeRunner(),
-                host=args.host,
-                port=args.port,
-                allow_remote=args.allow_remote,
+            from investigate import tray_gui
+        except ImportError as exc:
+            print(
+                f"error: the tray needs its extra ({exc}). Install it with: uv sync --extra tray",
+                file=sys.stderr,
             )
-            server.start()
-        except (ValueError, OSError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
             return 2
-        print(f"History at {server.url} (Ctrl+C to stop)", flush=True)
-        server.serve_forever()
-        return 0
+        return run_tray(home, runner or ClaudeCodeRunner(), tray_gui.run, port=args.port)
+    if args.command == "serve":
+        return _serve(home, args, runner or ClaudeCodeRunner())
 
     try:
         config = load_config(home)
