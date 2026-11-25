@@ -113,3 +113,38 @@ class FakeRunner:
             log="fake resume log\n",
             error=None if self.resume_ok else "resume failed",
         )
+
+
+GOOD_FACTCHECK = """\
+# Write-up
+
+Two claims were checked.
+
+```json
+{
+  "schema_version": 1,
+  "title": "A video about sleep",
+  "summary": "Mostly reliable.",
+  "claims": [
+    {
+      "claim": "Adults need 7 to 9 hours of sleep.",
+      "verdict": "confirmed",
+      "reason": "Guidelines say so.",
+      "citations": [{"title": "Guideline", "url": "https://example.com/g", "note": "2015"}]
+    },
+    {
+      "claim": "Everyone needs 12 hours.",
+      "verdict": "Wrong",
+      "reason": "No guideline says that.",
+      "citations": []
+    },
+    {
+      "claim": "Blue light ruins sleep.",
+      "verdict": "partly true",
+      "reason": "The effect is small.",
+      "citations": []
+    }
+  ]
+}
+```
+"""

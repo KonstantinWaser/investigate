@@ -20,7 +20,7 @@ import shutil
 import socket
 import stat
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.parser import BytesParser
@@ -30,13 +30,14 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from investigate import history
-from investigate.attachments import AttachmentError, Upload, check_attachments
+from investigate.attachments import AttachmentError, AttachmentSource, Upload, check_attachments
 from investigate.capture import capture_csp, capture_page
 from investigate.config import Config, ConfigError, Depth, load_config, validate_raw
+from investigate.factcheck import KIND as FACT_CHECK
 from investigate.followup import FollowupError, FollowupManager
 from investigate.runner import Runner
 from investigate.runqueue import QueueClosed, RunQueue
-from investigate.service import execute_run, fail_run, reserve_run
+from investigate.service import KIND, execute_run, fail_run, reserve_run
 from investigate.settings import (
     SaveResult,
     read_raw,
@@ -177,6 +178,7 @@ class HistoryServer:
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._promote_lock = threading.Lock()
         self._interrupted = threading.Event()
         self.shutdown_grace = 10.0  # seconds a running Run gets when `serve_forever` ends
         self._active: set[str] = set()  # queued or running here: cannot be deleted
@@ -317,10 +319,66 @@ class HistoryServer:
             too_big = any(len(u.content) > max_bytes for u in uploads)
             raise SubmitError(str(exc), 413 if too_big else 400) from exc
         item = chr(10).join(p for p in [text.strip(), *urls] if p)
+        return self.enqueue_run(item, chosen, uploads)
 
+    def submit_fact_check(
+        self, item: str, depth: Depth, uploads: Sequence[Upload], notes: Sequence[str] = ()
+    ) -> str:
+        """Queue a Fact-check of `item` (the Inbox calls this) and return its id. It waits in
+        the same queue as every other Run, so `parallel_runs` applies."""
+        return self.enqueue_run(item, depth, uploads, kind=FACT_CHECK, notes=notes)
+
+    def promote(self, run_id: str, depth: str = "") -> str:
+        """Start an Investigation on the Item of a finished Fact-check, linked to it. Asking
+        again returns the Investigation already made (unless that one failed)."""
+        folder = self.run_folder(run_id)
+        with self._promote_lock:  # two clicks at once must not start two Investigations
+            entries = history.load_entries(self.home)
+            source = next((e for e in entries if e.id == run_id), None)
+            if folder is None or source is None or not folder.is_dir():
+                raise SubmitError("no such Run", HTTPStatus.NOT_FOUND)
+            if source.kind != FACT_CHECK:
+                raise SubmitError("only a Fact-check can be promoted")
+            if source.status in ("queued", "running"):
+                raise SubmitError("the Fact-check is still running", HTTPStatus.CONFLICT)
+            existing = next(
+                (e for e in entries if e.promoted_from == run_id and e.status != "failed"), None
+            )
+            if existing is not None:
+                return existing.id
+            try:
+                chosen = Depth(depth) if depth else Depth(source.depth)
+            except ValueError:
+                raise SubmitError(f"unknown depth {depth!r}") from None
+            item = (folder / "item.md").read_text(encoding="utf-8", errors="replace")
+            attached = folder / ATTACHMENTS_DIR
+            files = (
+                sorted(p for p in attached.glob("*") if p.is_file()) if attached.is_dir() else []
+            )
+            return self.enqueue_run(item, chosen, files, promoted_from=run_id)
+
+    def enqueue_run(
+        self,
+        item: str,
+        chosen: Depth,
+        uploads: Sequence[AttachmentSource],
+        *,
+        kind: str = KIND,
+        notes: Sequence[str] = (),
+        promoted_from: str | None = None,
+    ) -> str:
+        """List the Run as `queued` and put it in the queue. Returns its id."""
         now = datetime.now(UTC)
         try:
-            folder = reserve_run(item, chosen, home=self.home, attachments=uploads, now=now)
+            folder = reserve_run(
+                item,
+                chosen,
+                home=self.home,
+                attachments=uploads,
+                now=now,
+                kind=kind,
+                promoted_from=promoted_from,
+            )
         except OSError as exc:
             raise RuntimeError(f"could not create the run folder: {exc}") from exc
         run_id = folder.name
@@ -337,6 +395,9 @@ class HistoryServer:
                     now=now,
                     attachments=uploads,
                     reserved=folder,
+                    kind=kind,
+                    notes=notes,
+                    promoted_from=promoted_from,
                 )
             except Exception as exc:  # the entry must not stay queued or running
                 self._mark_failed(run_id, f"{type(exc).__name__}: {exc}")
@@ -617,8 +678,24 @@ class _Handler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/runs/([^/]+)/delete", path)
         if match:
             self._delete(unquote(match.group(1)), redirect=True)
+            return
+        match = re.fullmatch(r"/runs/([^/]+)/promote", path)
+        if match:
+            self._promote(unquote(match.group(1)), body)
         else:
             self._text(HTTPStatus.NOT_FOUND, "not found")
+
+    def _promote(self, run_id: str, body: bytes) -> None:
+        form = parse_qs(body.decode("utf-8", "replace"))
+        depth = (form.get("depth") or [""])[0].strip()
+        try:
+            self.app.promote(run_id, depth)
+        except SubmitError as exc:
+            self._json(exc.status, {"error": str(exc)})
+        except (RuntimeError, OSError) as exc:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+        else:
+            self._redirect("/")
 
     def do_DELETE(self) -> None:
         if not self._guard(state_changing=True):

@@ -52,7 +52,8 @@ def test_menu_has_the_agreed_items_and_new_is_the_left_click(home):
     ]
     by = {i.label: i for i in items}
     assert by["New"].default and not by["History"].default
-    assert not by["Check inbox now"].enabled and by["Settings"].enabled
+    assert by["Check inbox now"].enabled and by["Check inbox now"].action
+    assert by["Settings"].enabled
     assert by["Log in to sites"].enabled and by["Log in to sites"].action
 
 

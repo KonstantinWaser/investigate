@@ -17,6 +17,7 @@ from markdown_it import MarkdownIt
 
 from investigate.attachments import Attachment
 from investigate.result import ParsedResult, parse_result
+from investigate.webpages import VERDICT_LABELS
 
 _md = MarkdownIt("commonmark", {"html": False}).disable("image")
 
@@ -29,6 +30,11 @@ STATUS_NOTES = {
 _CSS = """\
 :root{color-scheme:light dark;--bg:#fff;--fg:#1c1e21;--muted:#5f6670;--line:#d9dde3;\
 --card:#f6f7f9;--warn:#fff4d6;--warnfg:#5a4300;--bad:#fde8e8;--badfg:#7a1d1d;--link:#1459b3}
+@media(prefers-color-scheme:dark){.v-confirmed{background:#173a22;color:#9fe0b2}\
+.v-partly_true{background:#3d3210;color:#f0d68a}\
+.v-outdated{background:#25264a;color:#b9bbf0}\
+.v-unverified{background:#2e3033;color:#c3c7cc}\
+.v-wrong{background:#431a1a;color:#f3b4b4}}
 @media(prefers-color-scheme:dark){:root{--bg:#15171a;--fg:#e6e8eb;--muted:#9aa3ad;\
 --line:#2f343b;--card:#1d2024;--warn:#3a2f10;--warnfg:#f0d68a;--bad:#3b1a1a;--badfg:#f3b4b4;\
 --link:#7db3ff}}
@@ -48,6 +54,15 @@ padding:.9rem 1rem;margin:.75rem 0}
 .finding p{margin:.25rem 0}
 .conf{display:inline-block;font-size:.75rem;font-weight:600;text-transform:uppercase;\
 border:1px solid var(--line);border-radius:1rem;padding:0 .5rem;color:var(--muted)}
+.verdict{display:inline-block;font-size:.75rem;font-weight:700;border-radius:1rem;\
+padding:.05rem .6rem;border:1px solid transparent}
+.v-confirmed{background:#dcf5e3;color:#0d5a26}
+.v-partly_true{background:#fff1cc;color:#6b4a00}
+.v-outdated{background:#e8e8f5;color:#2d2f7a}
+.v-unverified{background:#ececec;color:#444}
+.v-wrong{background:#fde1e1;color:#8a1212}
+.promote{margin:1.5rem 0}
+.promote select,.promote button{font:inherit;padding:.35rem .6rem}
 .cites{margin:.5rem 0 0;padding-left:1.2rem;font-size:.9rem}
 .note{color:var(--muted)}
 details{margin-top:1.5rem}
@@ -130,6 +145,9 @@ class ReportInput:
     error: str | None = None
     contexts: tuple[str, ...] = ()  # Context names in config order, one subsection each
     attachments: tuple[Attachment, ...] = ()
+    notes: tuple[str, ...] = ()  # shown as notices, e.g. "no transcript was available"
+    run_id: str = ""  # a Fact-check's id, for its "Promote to Investigation" form
+    promoted_from: str | None = None  # an Investigation made from this Fact-check
 
 
 def _safe_link(url: str, label: str) -> str:
@@ -164,6 +182,49 @@ def _findings(result: ParsedResult, level: str = "h2") -> str:
             f"{detail}{_citations(f.citations)}</div>"
         )
     return f"<{level}>Findings</{level}>" + "".join(blocks)
+
+
+def _claims(result: ParsedResult) -> str:
+    structured = result.structured
+    if structured is None or structured.claims is None:
+        return ""
+    if not structured.claims:
+        return '<h2>Claims</h2><p class="note">The agent found no checkable claims.</p>'
+    blocks = []
+    for c in structured.claims:
+        label = VERDICT_LABELS.get(c.verdict, c.verdict)
+        blocks.append(
+            '<div class="finding">'
+            f'<p><span class="verdict v-{escape(c.verdict, quote=True)}">{escape(label)}</span> '
+            f"<strong>{escape(c.claim)}</strong></p>"
+            f"<p>{escape(c.reason)}</p>{_citations(c.citations)}</div>"
+        )
+    return "<h2>Claims</h2>" + "".join(blocks)
+
+
+def _promote(data: ReportInput) -> str:
+    """A plain form, so the saved page needs no script. It posts to the server that serves it."""
+    if data.kind != "fact-check" or not data.run_id:
+        return ""
+    rid = escape(quote(data.run_id, safe=""), quote=True)
+    return (
+        f'<form class="promote" method="post" action="/runs/{rid}/promote">'
+        '<label>Depth <select name="depth">'
+        '<option value="quick">quick</option>'
+        '<option value="standard" selected>standard</option>'
+        '<option value="deep">deep</option></select></label> '
+        "<button>Promote to Investigation</button></form>"
+    )
+
+
+def _promoted_note(data: ReportInput) -> str:
+    if not data.promoted_from:
+        return ""
+    rid = escape(quote(data.promoted_from, safe=""), quote=True)
+    return (
+        '<p class="note">Promoted from the Fact-check '
+        f'<a href="/runs/{rid}/">{escape(data.promoted_from)}</a>.</p>'
+    )
 
 
 def _relevance(result: ParsedResult, contexts: tuple[str, ...]) -> str:
@@ -226,6 +287,8 @@ def render_report(data: ReportInput) -> str:
     if data.status in STATUS_NOTES:
         cls = "notice bad" if data.status == "failed" else "notice"
         notices.append(f'<div class="{cls}">{escape(STATUS_NOTES[data.status])}</div>')
+    for note in data.notes:
+        notices.append(f'<div class="notice">{escape(note)}</div>')
     if data.error:
         notices.append(f'<div class="notice bad">Error: {escape(data.error)}</div>')
     if structured is None:
@@ -246,9 +309,11 @@ def render_report(data: ReportInput) -> str:
         f"{HEAD_MARK}<title>{escape(title)}</title><style>{_CSS}</style></head><body><main>"
         f"<h1>{escape(title)}</h1>"
         f'<div class="meta">{meta}</div>'
-        f"{''.join(notices)}{summary}{_findings(data.result)}"
+        f"{''.join(notices)}{_promoted_note(data)}{summary}{_claims(data.result)}"
+        f"{_findings(data.result)}"
         f"{_relevance(data.result, data.contexts)}{body_html}"
         f"{_item_section(data.item, data.attachments)}"
+        f"{_promote(data)}"
         f"{FOLLOWUPS_OPEN}{FOLLOWUPS_CLOSE}{FOLLOWUP_BOX}"
         "</main></body></html>\n"
     )
