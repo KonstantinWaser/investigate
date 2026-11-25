@@ -339,9 +339,7 @@ def test_submit_returns_id_and_run_goes_running_then_done(home):
         saved = list((folder / "attachments").iterdir())
         assert [f.name for f in saved] == ["evil name.pdf"]
         assert saved[0].read_bytes() == b"PDFDATA"
-        assert f"attachments/{saved[0].name}" in item
         assert c.get(f"/runs/{run_id}/attachments/evil%20name.pdf")[2] == b"PDFDATA"
-        assert not list((home / "uploads").iterdir())
     finally:
         runner.release.set()
         srv.stop()
@@ -498,19 +496,6 @@ def test_keep_alive_connection_dies_with_stop(home):
     conn.close()
 
 
-def test_failed_attachment_move_still_returns_the_id_and_fails_the_run(home, server, monkeypatch):
-    def broken(*a, **k):
-        raise OSError("disk says no")
-
-    monkeypatch.setattr("investigate.server.shutil.move", broken)
-    body, headers = _multipart({"text": "x"}, [("attachments", "a.txt", b"1")])
-    status, _, resp = Client(server).post("/api/runs", body, headers)
-    assert status == 202
-    server.wait_for_runs()
-    (entry,) = history.load_entries(home)
-    assert entry.id == json.loads(resp)["id"] and entry.status == "failed"
-
-
 def test_concurrent_submits_are_all_tracked(home):
     runner = BlockingRunner()
     srv = HistoryServer(home, runner, port=0)
@@ -583,3 +568,81 @@ def test_other_loopback_address_is_served(home):
         assert conn.getresponse().status == 200
     finally:
         srv.stop()
+
+
+# attachments through the shared module
+
+
+PNG = bytes.fromhex("89504e470d0a1a0a") + b"rest"
+
+
+def test_reserved_and_hostile_upload_names_are_made_safe(home, server):
+    body, headers = _multipart(
+        {"text": "x"},
+        [
+            ("attachments", "NUL", b"1"),
+            ("attachments", "nul.txt", b"2"),
+            ("attachments", "..\\..\\evil.txt", b"3"),
+            ("attachments", "a:b*c?.txt", b"4"),
+        ],
+    )
+    status, _, resp = Client(server).post("/api/runs", body, headers)
+    assert status == 202
+    server.wait_for_runs()
+    run_id = json.loads(resp)["id"]
+    names = sorted(f.name for f in (home / "runs" / run_id / "attachments").iterdir())
+    assert "NUL" not in names and "nul.txt" not in names
+    assert "attachment-NUL" in names and "attachment-nul.txt" in names and "evil.txt" in names
+    assert all(not set(n) & set(":*?" + chr(92) + "/") for n in names)
+    assert not (home / "runs" / "evil.txt").exists() and not (home / "evil.txt").exists()
+
+
+def test_oversize_attachment_is_413_with_the_message_and_starts_no_run(home, server):
+    (home).mkdir(exist_ok=True)
+    (home / "config.toml").write_text("max_attachment_mb = 0.001" + chr(10), encoding="utf-8")
+    body, headers = _multipart({"text": "x"}, [("attachments", "big.bin", b"x" * 5000)])
+    status, _, resp = Client(server).post("/api/runs", body, headers)
+    assert status == 413
+    assert "big.bin" in json.loads(resp)["error"] and "limit" in json.loads(resp)["error"]
+    assert history.load_entries(home) == []
+    assert not (home / "runs").exists() or not list((home / "runs").iterdir())
+
+
+def test_request_body_over_the_cap_is_refused_before_it_is_read(home, server):
+    home.mkdir(exist_ok=True)
+    (home / "config.toml").write_text("max_attachment_mb = 0.001" + chr(10), encoding="utf-8")
+    conn = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+    conn.putrequest("POST", "/api/runs")
+    conn.putheader("Origin", f"http://127.0.0.1:{server.port}")
+    conn.putheader("Content-Type", "multipart/form-data; boundary=b")
+    conn.putheader("Content-Length", str(50 * 1024 * 1024))
+    conn.endheaders()  # no body is ever sent: the server must answer without waiting for it
+    resp = conn.getresponse()
+    assert resp.status == 413
+    conn.close()
+
+
+def test_too_many_files_is_refused(home, server):
+    files = [("attachments", f"f{i}.txt", b"x") for i in range(11)]
+    body, headers = _multipart({"text": "x"}, files)
+    assert Client(server).post("/api/runs", body, headers)[0] == 413
+
+
+def test_images_display_inline_in_the_report_and_other_files_download(home, server):
+    body, headers = _multipart(
+        {"text": "x"},
+        [("attachments", "shot.png", PNG), ("attachments", "notes.pdf", b"%PDF")],
+    )
+    client = Client(server)
+    run_id = json.loads(client.post("/api/runs", body, headers)[2])["id"]
+    server.wait_for_runs()
+    status, report_headers, report = client.get(f"/runs/{run_id}/")
+    assert status == 200 and b'src="attachments/shot.png"' in report
+    assert "img-src 'self'" in report_headers["Content-Security-Policy"]
+    assert "script-src" not in report_headers["Content-Security-Policy"]
+    _, img_headers, data = client.get(f"/runs/{run_id}/attachments/shot.png")
+    assert data == PNG and img_headers["Content-Type"] == "image/png"
+    assert img_headers["Content-Disposition"] == "inline"
+    assert img_headers["Content-Security-Policy"] == "sandbox"
+    _, pdf_headers, _ = client.get(f"/runs/{run_id}/attachments/notes.pdf")
+    assert pdf_headers["Content-Disposition"] == "attachment"

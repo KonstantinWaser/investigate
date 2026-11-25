@@ -21,7 +21,6 @@ import shutil
 import socket
 import stat
 import threading
-import uuid
 from email.parser import BytesParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,19 +28,26 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from investigate import history
-from investigate.config import Depth
+from investigate.attachments import AttachmentError, Upload, check_attachments
+from investigate.config import ConfigError, Depth, load_config
 from investigate.runner import Runner, RunnerOutcome, RunRequest
 from investigate.service import execute_run
 from investigate.webpages import Filters, apply_filters, history_page
 
 DEFAULT_PORT = 8765
-MAX_BODY = 200 * 1024 * 1024
+MAX_FILES = 10  # per submission
+BODY_MARGIN = 1024 * 1024  # room for the text, URLs and multipart framing
 ATTACHMENTS_DIR = "attachments"
+_INLINE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class SubmitError(ValueError):
-    """The submitted form is unusable (becomes a 400)."""
+    """The submitted form is unusable (a 4xx, 400 unless stated)."""
+
+    def __init__(self, message: str, status: int = HTTPStatus.BAD_REQUEST) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def is_loopback(host: str) -> bool:
@@ -51,37 +57,6 @@ def is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host.strip("[]")).is_loopback
     except ValueError:
         return False
-
-
-def safe_filename(name: str, taken: set[str]) -> str:
-    """A plain file name: no folders, no odd characters, unique among `taken`."""
-    base = re.split(r"[\\/]", name)[-1]
-    base = re.sub(r"[^A-Za-z0-9._ -]+", "_", base).strip(" .") or "file"
-    base = base[:100]
-    stem, dot, ext = base.rpartition(".")
-    if not dot:
-        stem, ext = base, ""
-    candidate, n = base, 1
-    while candidate.lower() in taken:
-        n += 1
-        candidate = f"{stem}-{n}.{ext}" if ext else f"{stem}-{n}"
-    taken.add(candidate.lower())
-    return candidate
-
-
-def save_attachments(folder: Path, files: list[tuple[str, bytes]]) -> list[str]:
-    """Write uploaded files into `folder` under safe names and return the names.
-
-    Deliberately minimal: the attachments module of issue #3 can replace this one function.
-    """
-    folder.mkdir(parents=True, exist_ok=True)
-    taken: set[str] = set()
-    names = []
-    for original, data in files:
-        name = safe_filename(original, taken)
-        (folder / name).write_bytes(data)
-        names.append(name)
-    return names
 
 
 def parse_submission(content_type: str, body: bytes) -> tuple[str, list[str], str, list]:
@@ -148,20 +123,16 @@ def request_allowed(headers, *, state_changing: bool, allow_remote: bool) -> boo
     return site is None or site in ("same-origin", "none")
 
 
-class _StagedRunner:
-    """Wraps the real runner: reports the run folder to the submit call as soon as the Run
-    exists, and moves the staged attachments into it before the agent starts."""
+class _AnnouncingRunner:
+    """Wraps the real runner and reports the run folder to the submit call as soon as the Run
+    exists, so the id can be returned before the agent has finished."""
 
-    def __init__(self, inner: Runner, staged: Path | None, announce) -> None:
-        self.inner, self.staged, self.announce = inner, staged, announce
+    def __init__(self, inner: Runner, announce) -> None:
+        self.inner, self.announce = inner, announce
         self.name = inner.name
 
     def run(self, request: RunRequest) -> RunnerOutcome:
         self.announce(request.workdir.name)
-        if self.staged is not None:
-            staged, self.staged = self.staged, None
-            # A failure here propagates into `execute_run`, which records a failed Run.
-            shutil.move(str(staged), str(request.workdir / ATTACHMENTS_DIR))
         return self.inner.run(request)
 
 
@@ -270,16 +241,19 @@ class HistoryServer:
             raise SubmitError(f"unknown depth {depth!r}") from None
         if not (text.strip() or urls or files):
             raise SubmitError("nothing to investigate: send text, URLs or an attachment")
-        staged = None
-        names: list[str] = []
-        if files:
-            staged = self.home / "uploads" / uuid.uuid4().hex
-            names = save_attachments(staged, files)
-        parts = [text.strip(), *urls]
-        if names:
-            listing = "\n".join(f"- {ATTACHMENTS_DIR}/{n}" for n in names)
-            parts.append(f"Attached files (in this folder):\n{listing}")
-        item = "\n".join(p for p in parts if p)
+        try:
+            max_bytes = int(load_config(self.home).max_attachment_mb * 1_048_576)
+        except ConfigError as exc:
+            raise RuntimeError(str(exc)) from exc
+        uploads = [Upload(name, data) for name, data in files]
+        if len(uploads) > MAX_FILES:
+            raise SubmitError(f"at most {MAX_FILES} attachments per submission", 413)
+        try:
+            check_attachments(uploads, max_bytes)
+        except AttachmentError as exc:
+            too_big = any(len(u.content) > max_bytes for u in uploads)
+            raise SubmitError(str(exc), 413 if too_big else 400) from exc
+        item = chr(10).join(p for p in [text.strip(), *urls] if p)
 
         announced = threading.Event()
         box: dict[str, str] = {}
@@ -290,19 +264,17 @@ class HistoryServer:
                 self._active.add(run_id)
             announced.set()
 
-        wrapper = _StagedRunner(self.runner, staged, announce)
+        wrapper = _AnnouncingRunner(self.runner, announce)
 
         def work() -> None:
             try:
-                execute_run(item, chosen, home=self.home, runner=wrapper)
+                execute_run(item, chosen, home=self.home, runner=wrapper, attachments=uploads)
             except Exception as exc:  # reported to the submitter if it is still waiting
                 box.setdefault("error", f"{type(exc).__name__}: {exc}")
                 self._mark_failed(box.get("id"), box["error"])
             finally:
                 with self._lock:
                     self._active.discard(box.get("id", ""))
-                if staged is not None:
-                    shutil.rmtree(staged, ignore_errors=True)
                 announced.set()
 
         worker = threading.Thread(target=work, daemon=True)
@@ -425,12 +397,20 @@ class _Handler(BaseHTTPRequestHandler):
             self._text(HTTPStatus.FORBIDDEN, "forbidden: cross-origin or non-local request")
         return ok
 
+    def _body_cap(self) -> int:
+        """The largest body worth reading: every allowed file at the size limit, plus a margin."""
+        try:
+            max_bytes = int(load_config(self.app.home).max_attachment_mb * 1_048_576)
+        except ConfigError:
+            max_bytes = 25 * 1_048_576
+        return max_bytes * MAX_FILES + BODY_MARGIN
+
     def _read_body(self) -> bytes | None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = -1
-        if length < 0 or length > MAX_BODY:
+        if length < 0 or length > self._body_cap():
             self.close_connection = True
             self._text(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "body too large or length invalid")
             return None
@@ -471,7 +451,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         data = file.read_bytes()
         if rel in ("", "report.html"):
-            policy = "default-src 'none'; style-src 'unsafe-inline'"
+            policy = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'"
             self._send(
                 HTTPStatus.OK,
                 data,
@@ -485,7 +465,10 @@ class _Handler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 data,
                 ctype,
-                {"Content-Security-Policy": "sandbox", "Content-Disposition": "attachment"},
+                {
+                    "Content-Security-Policy": "sandbox",
+                    "Content-Disposition": "inline" if ctype in _INLINE_TYPES else "attachment",
+                },
             )
 
     # POST and DELETE
@@ -504,7 +487,7 @@ class _Handler(BaseHTTPRequestHandler):
                 )
                 run_id = self.app.submit(text, urls, depth, files)
             except SubmitError as exc:
-                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                self._json(exc.status, {"error": str(exc)})
             except RuntimeError as exc:
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             else:
