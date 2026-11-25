@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from investigate.config import Depth
-from investigate.result import SCHEMA_EXAMPLE
+from investigate.result import RELEVANCE_EXAMPLE, SCHEMA_EXAMPLE
 
 RESULT_FILE = "result.md"
 
@@ -41,14 +41,24 @@ def build_prompt(
     item: str,
     depth: Depth,
     language: str,
-    context_files: tuple[Path, ...] = (),
+    contexts: tuple[tuple[str, Path], ...] = (),
 ) -> str:
+    """`contexts` holds (name, file) pairs in config order."""
     context = ""
-    if context_files:
-        listed = "\n".join(f"- {p}" for p in context_files)
+    if contexts:
+        listed = "\n".join(f"- {name}: {path}" for name, path in contexts)
         context = (
-            "\nContext files (read them, then add a short section 'Relevance to your work' "
-            "to the Markdown body relating the findings to them):\n" + listed + "\n"
+            "\nContexts. Each is a named file describing one area of the user's work. Read "
+            "them, then relate the findings to each Context in the JSON block's relevance "
+            "list (the Report renders it as 'Relevance to your work'; do not write that "
+            "section in the Markdown body). Keep the Contexts strictly separate: nothing from "
+            "one Context may appear in another Context's entry, and write no blended summary "
+            "across Contexts. If nothing in the findings bears on a Context, set relevant to "
+            "false and leave text empty; never invent relevance.\n"
+            + listed
+            + "\n\n"
+            + RELEVANCE_EXAMPLE
+            + "\n"
         )
     return f"""\
 You are a research agent producing one cited Report for the Item below.

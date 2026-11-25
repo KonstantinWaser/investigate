@@ -40,11 +40,21 @@ DEFAULT_DEPTHS: dict[Depth, DepthSettings] = {
 
 
 @dataclass(frozen=True)
+class ContextFile:
+    name: str  # unique, shown as the subsection heading in the Report
+    path: str  # absolute, resolved by `load_config`
+
+
+@dataclass(frozen=True)
 class Config:
     permission_mode: PermissionMode = PermissionMode.BYPASS
     language: str = "English"
-    context_files: tuple[str, ...] = ()  # absolute, resolved by `load_config`
+    contexts: tuple[ContextFile, ...] = ()  # in config order
     depths: dict[Depth, DepthSettings] = field(default_factory=lambda: dict(DEFAULT_DEPTHS))
+
+    @property
+    def context_files(self) -> tuple[str, ...]:
+        return tuple(c.path for c in self.contexts)
 
 
 DEFAULT_CONFIG_TOML = """\
@@ -58,8 +68,13 @@ permission_mode = "bypass"
 # Language of the Report.
 language = "English"
 
-# Your Context files: paths of files describing what you work on. Reports relate
-# their findings to them.
+# Your Context files: Markdown files describing what you work on. Each has a name
+# and a path. Reports relate their findings to each one, kept strictly separate.
+# A plain path string also works and is named after the file.
+# context_files = [
+#     {name = "employer", path = "~/notes/employer.md"},
+#     {name = "studies", path = "~/notes/studies.md"},
+# ]
 context_files = []
 
 # Wall-clock limit and model per Depth. An empty model means the CLI default.
@@ -108,6 +123,30 @@ def _resolve(value: str, base: Path) -> str:
     return str((expanded if expanded.is_absolute() else base / expanded).resolve())
 
 
+def _parse_contexts(raw: object, path: Path) -> tuple[ContextFile, ...]:
+    """Entries are `{name = "...", path = "..."}` tables or plain path strings (named by stem)."""
+    problem = f"{path}: context_files must be a list of {{name, path}} tables or path strings"
+    if not isinstance(raw, list):
+        raise ConfigError(problem)
+    contexts: list[ContextFile] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            name, value = Path(entry).stem, entry
+        elif isinstance(entry, dict):
+            name, value = entry.get("name"), entry.get("path")
+        else:
+            raise ConfigError(problem)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"{path}: every Context needs a non-empty path")
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError(f"{path}: Context {value!r} needs a non-empty name")
+        name = name.strip()
+        if any(c.name == name for c in contexts):
+            raise ConfigError(f"{path}: Context name {name!r} is used twice")
+        contexts.append(ContextFile(name, _resolve(value, path.parent)))
+    return tuple(contexts)
+
+
 def _parse(raw: dict, path: Path) -> Config:
     try:
         mode = PermissionMode(raw.get("permission_mode", "bypass"))
@@ -119,9 +158,7 @@ def _parse(raw: dict, path: Path) -> Config:
     language = raw.get("language", "English")
     if not isinstance(language, str) or not language.strip():
         raise ConfigError(f"{path}: language must be a non-empty string")
-    context = raw.get("context_files", [])
-    if not isinstance(context, list) or not all(isinstance(c, str) for c in context):
-        raise ConfigError(f"{path}: context_files must be a list of strings")
+    contexts = _parse_contexts(raw.get("context_files", []), path)
 
     depths = dict(DEFAULT_DEPTHS)
     raw_depths = raw.get("depths", {})
@@ -142,4 +179,4 @@ def _parse(raw: dict, path: Path) -> Config:
         if model is not None and not isinstance(model, str):
             raise ConfigError(f"{path}: depths.{name}.model must be a string")
         depths[depth] = DepthSettings(float(minutes), model or None)
-    return Config(mode, language.strip(), tuple(_resolve(c, path.parent) for c in context), depths)
+    return Config(mode, language.strip(), contexts, depths)

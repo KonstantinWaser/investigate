@@ -32,6 +32,7 @@ body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,sans
 main{max-width:46rem;margin:0 auto;padding:2rem 1rem 4rem}
 h1{font-size:1.7rem;line-height:1.2;margin:0 0 .5rem}
 h2{font-size:1.2rem;margin:2rem 0 .75rem}
+h3{font-size:1rem;margin:1.25rem 0 .25rem}
 a{color:var(--link)}
 .meta{color:var(--muted);font-size:.85rem;margin-bottom:1.5rem}
 .summary{font-size:1.1rem}
@@ -61,6 +62,7 @@ class ReportInput:
     created: str
     result: ParsedResult
     error: str | None = None
+    contexts: tuple[str, ...] = ()  # Context names in config order, one subsection each
 
 
 def _safe_link(url: str, label: str) -> str:
@@ -97,6 +99,27 @@ def _findings(result: ParsedResult) -> str:
     return "<h2>Findings</h2>" + "".join(blocks)
 
 
+def _relevance(result: ParsedResult, contexts: tuple[str, ...]) -> str:
+    """One subsection per configured Context, in config order. Other names are never shown."""
+    if not contexts:
+        return ""
+    structured = result.structured
+    by_name = {r.context: r for r in structured.relevance} if structured else {}
+    parts = ["<h2>Relevance to your work</h2>"]
+    for name in contexts:
+        entry = by_name.get(name)
+        if entry is None and structured is None:
+            text = '<p class="note">Not available, the structured result is malformed.</p>'
+        elif entry is None:
+            text = '<p class="note">The agent reported nothing for this Context.</p>'
+        elif entry.relevant and entry.text:
+            text = _md.render(entry.text)
+        else:
+            text = '<p class="note">Not relevant</p>'
+        parts.append(f'<section class="context"><h3>{escape(name)}</h3>{text}</section>')
+    return "".join(parts)
+
+
 def render_report(data: ReportInput) -> str:
     structured = data.result.structured
     title = structured.title if structured else data.title
@@ -124,7 +147,8 @@ def render_report(data: ReportInput) -> str:
         f"<title>{escape(title)}</title><style>{_CSS}</style></head><body><main>"
         f"<h1>{escape(title)}</h1>"
         f'<div class="meta">{meta}</div>'
-        f"{''.join(notices)}{summary}{_findings(data.result)}{body_html}"
+        f"{''.join(notices)}{summary}{_findings(data.result)}"
+        f"{_relevance(data.result, data.contexts)}{body_html}"
         f"<details><summary>Item</summary><pre>{escape(data.item)}</pre></details>"
         "</main></body></html>\n"
     )
