@@ -8,6 +8,7 @@ import shutil
 import traceback
 import uuid
 from collections.abc import Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,7 +16,9 @@ from urllib.parse import urlparse
 
 from investigate import history
 from investigate.attachments import AttachmentSource, check_attachments, store_attachments
+from investigate.browser import is_logged_in, kill_profile_browsers, profile_dir
 from investigate.config import Config, Depth, load_config
+from investigate.profile_lock import ProfileBusy, profile_lock
 from investigate.prompt import RESULT_FILE, build_prompt
 from investigate.report import ReportInput, render_report
 from investigate.result import parse_result
@@ -123,17 +126,36 @@ def execute_run(
         if c.name not in present
     ]
     context_files = tuple(path for _, path in contexts)
+    # One Run at a time may drive the browser profile. A busy profile means this Run goes on
+    # without the browser and says so in its prompt.
+    stack = ExitStack()
+    use_browser: bool | None = None
+    if config.browser and not is_logged_in(home):
+        use_browser = False
+        context_notes.append(
+            "WARNING: browser = true but no login yet; run `investigate login`. "
+            "Running without the browser." + chr(10)
+        )
+    elif config.browser:
+        try:
+            stack.enter_context(profile_lock(home))
+            stack.callback(kill_profile_browsers, profile_dir(home))
+            use_browser = True
+        except ProfileBusy:
+            use_browser = False
     request = RunRequest(
-        prompt=build_prompt(item, depth, config.language, contexts, stored),
+        prompt=build_prompt(item, depth, config.language, contexts, stored, use_browser),
         workdir=folder,
         session_id=session_id,
         timeout_seconds=settings.timeout_minutes * 60,
         model=settings.model,
         permission_mode=config.permission_mode,
         context_files=context_files,
+        browser_profile=profile_dir(home) if use_browser else None,
     )
     try:
-        outcome = runner.run(request)
+        with stack:
+            outcome = runner.run(request)
     except Exception:  # a runner must not raise, but one that does becomes a failed Run
         error = traceback.format_exc()
         outcome = RunnerOutcome(False, False, "", session_id, error, error)
@@ -187,6 +209,7 @@ def execute_run(
                 "runner": runner.name,
                 "model": settings.model,
                 "timeout_minutes": settings.timeout_minutes,
+                "browser": use_browser,
                 "result_problems": list(parsed.problems),
                 "attachments": [{"name": a.name, "size": a.size} for a in stored],
             },

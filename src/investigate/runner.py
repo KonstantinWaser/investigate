@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from investigate import browser
 from investigate.config import PermissionMode
 
 MCP_CONFIG_NAME = "mcp.json"
@@ -31,6 +32,7 @@ class RunRequest:
     model: str | None
     permission_mode: PermissionMode
     context_files: tuple[Path, ...] = ()
+    browser_profile: Path | None = None  # set: Playwright MCP drives this persistent profile
 
 
 @dataclass(frozen=True)
@@ -91,7 +93,11 @@ def build_command(command: list[str], request: RunRequest) -> list[str]:
         allowed = ["WebSearch", "WebFetch", "Agent", f"Edit({run_folder}/**)"]
         allowed += [f"Read({_rule_path(p)})" for p in request.context_files]
         allowed.append(f"Read({run_folder}/attachments/**)")  # the Item's attached files
+        if request.browser_profile is not None:
+            allowed += browser.ALLOWED_TOOLS
         cmd += ["--permission-mode", "dontAsk", "--allowedTools", *allowed]
+    if request.browser_profile is not None:
+        cmd += ["--disallowedTools", *browser.DENIED_TOOLS]
     return cmd
 
 
@@ -135,8 +141,11 @@ class ClaudeCodeRunner:
                 log="",
                 error="The 'claude' command was not found on PATH. Install Claude Code and log in.",
             )
+        servers = {}
+        if request.browser_profile is not None:
+            servers[browser.SERVER_NAME] = browser.playwright_server(request.browser_profile)
         (request.workdir / MCP_CONFIG_NAME).write_text(
-            json.dumps({"mcpServers": {}}), encoding="utf-8"
+            json.dumps({"mcpServers": servers}), encoding="utf-8"
         )
         argv = build_command(command, request)
         try:

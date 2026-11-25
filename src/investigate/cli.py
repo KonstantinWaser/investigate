@@ -7,7 +7,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from investigate import history
+from investigate import browser, history
 from investigate.attachments import AttachmentError
 from investigate.config import ConfigError, Depth, data_home, load_config
 from investigate.runner import ClaudeCodeRunner, Runner
@@ -35,6 +35,7 @@ def _parser() -> argparse.ArgumentParser:
         help="quick, standard (default) or deep.",
     )
     sub.add_parser("history", help="List past Runs.")
+    sub.add_parser("login", help="Open the browser profile to log in to YouTube, Instagram, X.")
     return parser
 
 
@@ -45,6 +46,9 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
         for e in sorted(history.load_entries(home), key=lambda e: e.created, reverse=True):
             print(f"{e.id}  {e.kind}  {e.depth}  {e.status}  {e.title}")
         return 0
+
+    if args.command == "login":
+        return browser.login(home)
 
     try:
         config = load_config(home)
