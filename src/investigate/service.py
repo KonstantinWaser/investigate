@@ -94,8 +94,11 @@ def reserve_run(
     now: datetime | None = None,
     kind: str = KIND,
     promoted_from: str | None = None,
+    notes: Sequence[str] = (),
 ) -> Path:
     """Make the run folder and list the Run as `queued`; `execute_run(reserved=...)` starts it.
+
+    `notes` are saved as `notes.json` right away, so they survive a Run that never starts.
 
     Pass the same `now` to both so the entry keeps the time the Item was handed in.
     """
@@ -103,6 +106,8 @@ def reserve_run(
     label = _label(item, attachments)
     folder = _new_run_folder(home, now.astimezone(), label)
     (folder / "item.md").write_text(item, encoding="utf-8")
+    if notes:
+        (folder / "notes.json").write_text(json.dumps(list(notes), indent=2), encoding="utf-8")
     created = now.isoformat(timespec="seconds")
     entry = history.HistoryEntry(
         folder.name,
@@ -283,6 +288,7 @@ def _execute_run(
         log += f"\nERROR: {outcome.error}\n"
     (folder / "agent.log").write_text(log, encoding="utf-8")
     parsed = parse_result(_read_result(folder, outcome), fact_check=kind == factcheck.KIND)
+    notes = (*notes, *parsed.warnings)
     if parsed.structured:
         (folder / "result.json").write_text(
             json.dumps(parsed.structured.to_json(), indent=2, ensure_ascii=False),

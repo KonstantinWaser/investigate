@@ -13,6 +13,36 @@ SCHEMA_VERSION = 1
 CONFIDENCES = ("high", "medium", "low")
 VERDICTS = ("confirmed", "partly_true", "outdated", "unverified", "wrong")
 
+# Wording an agent often uses instead of a Verdict, read after lower-casing and turning spaces and
+# hyphens into underscores. Anything not here (and not a Verdict) becomes `unverified` with a
+# warning in the Report, so one odd word does not discard a whole Fact-check.
+VERDICT_ALIASES = {
+    "true": "confirmed",
+    "accurate": "confirmed",
+    "correct": "confirmed",
+    "verified": "confirmed",
+    "supported": "confirmed",
+    "partially_true": "partly_true",
+    "mostly_true": "partly_true",
+    "half_true": "partly_true",
+    "partly_correct": "partly_true",
+    "mixed": "partly_true",
+    "misleading": "partly_true",
+    "out_of_date": "outdated",
+    "obsolete": "outdated",
+    "stale": "outdated",
+    "unknown": "unverified",
+    "unclear": "unverified",
+    "unproven": "unverified",
+    "inconclusive": "unverified",
+    "false": "wrong",
+    "incorrect": "wrong",
+    "inaccurate": "wrong",
+    "untrue": "wrong",
+    "mostly_false": "wrong",
+    "debunked": "wrong",
+}
+
 # Shown to the agent in the prompt. Keep in step with `parse_result`.
 SCHEMA_EXAMPLE = """\
 ```json
@@ -153,6 +183,7 @@ class ParsedResult:
     body: str  # Markdown text outside the JSON block
     structured: StructuredResult | None
     problems: tuple[str, ...] = field(default=())
+    warnings: tuple[str, ...] = field(default=())  # repaired, not rejected (an odd Verdict)
 
 
 def parse_result(text: str | None, *, fact_check: bool = False) -> ParsedResult:
@@ -171,17 +202,20 @@ def parse_result(text: str | None, *, fact_check: bool = False) -> ParsedResult:
     except json.JSONDecodeError as exc:
         return ParsedResult(body, None, (f"The JSON block is not valid JSON: {exc}",))
     problems: list[str] = []
-    structured = _validate(data, problems, fact_check)
+    warnings: list[str] = []
+    structured = _validate(data, problems, fact_check, warnings)
     if problems:
         return ParsedResult(body, None, tuple(problems))
-    return ParsedResult(body, structured)
+    return ParsedResult(body, structured, warnings=tuple(warnings))
 
 
 def _text(value: object) -> str | None:
     return value.strip() if isinstance(value, str) else None
 
 
-def _validate(data: object, problems: list[str], fact_check: bool) -> StructuredResult | None:
+def _validate(
+    data: object, problems: list[str], fact_check: bool, warnings: list[str]
+) -> StructuredResult | None:
     if not isinstance(data, dict):
         problems.append("The JSON block is not an object.")
         return None
@@ -200,7 +234,7 @@ def _validate(data: object, problems: list[str], fact_check: bool) -> Structured
             problems.append("'claims' is missing or not a list.")
         else:
             for i, item in enumerate(raw_claims):
-                claim = _claim(item, i, problems)
+                claim = _claim(item, i, problems, warnings)
                 if claim:
                     claims.append(claim)
     else:
@@ -287,7 +321,7 @@ def _citations(raw: object, where: str, problems: list[str]) -> list[Citation]:
     return citations
 
 
-def _claim(item: object, index: int, problems: list[str]) -> Claim | None:
+def _claim(item: object, index: int, problems: list[str], warnings: list[str]) -> Claim | None:
     where = f"claims[{index}]"
     if not isinstance(item, dict):
         problems.append(f"{where} is not an object.")
@@ -295,9 +329,16 @@ def _claim(item: object, index: int, problems: list[str]) -> Claim | None:
     claim = _text(item.get("claim"))
     if not claim:
         problems.append(f"{where}.claim is missing or not a non-empty string.")
-    verdict = _text(item.get("verdict"))
-    verdict = verdict.lower().replace(" ", "_") if verdict else None
-    if verdict not in VERDICTS:
+    said = _text(item.get("verdict"))
+    verdict = said.lower().replace(" ", "_").replace("-", "_") if said else None
+    verdict = VERDICT_ALIASES.get(verdict, verdict) if verdict else None
+    if said and verdict not in VERDICTS:
+        warnings.append(
+            f"{where}.verdict {said!r} is not a Verdict ({', '.join(VERDICTS)}); "
+            "it was recorded as unverified."
+        )
+        verdict = "unverified"
+    elif not said:
         problems.append(f"{where}.verdict must be one of {', '.join(VERDICTS)}.")
     reason = _text(item.get("reason"))
     if not reason:

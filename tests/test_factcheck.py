@@ -51,7 +51,7 @@ def test_fact_check_with_no_claims_is_valid_and_counts_nothing():
 def test_bad_verdict_reason_and_citation_are_reported():
     text = (
         '```json\n{"title": "T", "summary": "S", "claims": ['
-        '{"claim": "c", "verdict": "maybe", "reason": "", "citations": [{"title": "x"}]}]}\n```'
+        '{"claim": "c", "verdict": 3, "reason": "", "citations": [{"title": "x"}]}]}\n```'
     )
     parsed = parse_result(text, fact_check=True)
     assert parsed.structured is None

@@ -378,6 +378,7 @@ class HistoryServer:
                 now=now,
                 kind=kind,
                 promoted_from=promoted_from,
+                notes=notes,
             )
         except OSError as exc:
             raise RuntimeError(f"could not create the run folder: {exc}") from exc

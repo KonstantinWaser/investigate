@@ -158,6 +158,7 @@ class TrayApp:
         self._inbox_sources = inbox_sources
         self._clock, self._inbox_poll = clock, inbox_poll_seconds
         self.inbox: InboxScheduler | None = None
+        self._inbox_problem: str | None = None  # the outage last toasted, to toast it once
         self._login_thread: threading.Thread | None = None
         self._stop_gui: Callable[[], None] = lambda: None
         self._quitting = False
@@ -313,6 +314,8 @@ class TrayApp:
                 item.text, config.depth, item.attachments, item.notes
             ),
             stop=lambda: self._quitting,
+            max_attempts=config.max_attempts,
+            max_new=config.max_new_per_check,
         )
         if self._quitting:
             return True
@@ -320,13 +323,23 @@ class TrayApp:
             if manual:
                 self._tell(Toast("Inbox", "A check is already running.", history_url))
             return True
+        # An outage is toasted once, again when the error changes, and when it is over. A manual
+        # check always answers.
+        problem = result.errors[0] if result.errors else None
+        recovered = problem is None and self._inbox_problem is not None
         if result.created:
             self._tell(Toast(*inbox_toast(result.created), history_url))
-        elif result.errors and (manual or result.unreachable):
-            msg = toast_text(result.errors[0])
-            self._tell(Toast("Inbox check had problems", msg, history_url))
+        elif problem and (manual or result.unreachable):
+            if manual or problem != self._inbox_problem:
+                self._tell(Toast("Inbox check had problems", toast_text(problem), history_url))
+        elif recovered and not manual:
+            self._tell(Toast("Inbox", "The inbox is reachable again.", history_url))
         elif manual:
             self._tell(Toast("Inbox", "Nothing new in the inbox.", history_url))
+        for message in result.gave_up:
+            self._tell(Toast("Inbox gave up on an item", toast_text(message), history_url))
+        if problem is None or result.unreachable:
+            self._inbox_problem = problem
         return not result.unreachable
 
     def on_login(self) -> None:

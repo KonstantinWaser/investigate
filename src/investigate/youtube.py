@@ -7,9 +7,11 @@ the audio is transcribed locally, otherwise the Fact-check runs on the title and
 
 from __future__ import annotations
 
+import contextlib
 import re
+import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -17,12 +19,16 @@ from typing import Protocol
 from urllib.parse import parse_qs, urlsplit
 
 from investigate.attachments import Upload
-from investigate.inbox import InboxItem, InboxRef
+from investigate.inbox import InboxItem, InboxRef, ItemSkipped
 from investigate.transcribe import HOW_TO_ENABLE, Transcriber
 
 SOURCE_NAME = "youtube"
 DEFAULT_LANGUAGES = ("en", "de")
 DESCRIPTION_LIMIT = 4000
+DEFAULT_MAX_DURATION_SECONDS = 90 * 60
+MAX_AUDIO_BYTES = 300 * 1024 * 1024  # yt-dlp skips a larger audio file
+SOCKET_TIMEOUT = 30  # seconds, for every yt-dlp network read
+_NOT_READY = ("is_live", "is_upcoming", "post_live")  # yt-dlp live_status values
 _PLAYLIST_ID = re.compile(r"^(PL|OL|UU|FL|LL)[A-Za-z0-9_-]*$")
 _PLAYLIST_URL = "https://www.youtube.com/playlist?list={}"
 _HIDDEN_TITLES = {"[private video]", "[deleted video]"}
@@ -64,6 +70,7 @@ class VideoInfo:
     duration: int | None = None  # seconds
     description: str = ""
     subtitle_lang: str | None = None  # the track to fetch, when the video has a usable one
+    live_status: str | None = None  # yt-dlp: is_live, is_upcoming, post_live, was_live, not_live
 
 
 class YouTubeClient(Protocol):
@@ -128,16 +135,29 @@ class YtDlpClient:
         self._cookies = cookies
         self._languages = languages
 
-    def _options(self, **extra) -> dict:
-        options = {"quiet": True, "no_warnings": True, "noprogress": True, **extra}
-        if self._cookies is not None:
-            options["cookiefile"] = str(self._cookies)
-        return options
-
-    def playlist(self) -> list[InboxRef]:
+    @contextlib.contextmanager
+    def _ydl(self, **extra) -> Iterator:
+        """A YoutubeDL. yt-dlp rewrites its cookie file on close, so it gets a copy that is
+        deleted afterwards and the user's cookies.txt is never touched."""
         from yt_dlp import YoutubeDL
 
-        with YoutubeDL(self._options(extract_flat="in_playlist")) as ydl:
+        options = {
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+            "socket_timeout": SOCKET_TIMEOUT,
+            **extra,
+        }
+        with TemporaryDirectory() as tmp:
+            if self._cookies is not None:
+                copy = Path(tmp) / "cookies.txt"
+                shutil.copyfile(self._cookies, copy)  # a missing file raises, never anonymous
+                options["cookiefile"] = str(copy)
+            with YoutubeDL(options) as ydl:
+                yield ydl
+
+    def playlist(self) -> list[InboxRef]:
+        with self._ydl(extract_flat="in_playlist") as ydl:
             info = ydl.extract_info(self._playlist, download=False)
         refs = []
         for entry in (info or {}).get("entries") or []:
@@ -148,9 +168,7 @@ class YtDlpClient:
         return refs
 
     def video(self, video_id: str) -> VideoInfo:
-        from yt_dlp import YoutubeDL
-
-        with YoutubeDL(self._options()) as ydl:
+        with self._ydl() as ydl:
             info = ydl.extract_info(_watch_url(video_id), download=False)
         return VideoInfo(
             id=video_id,
@@ -161,13 +179,12 @@ class YtDlpClient:
             duration=info.get("duration"),
             description=info.get("description") or "",
             subtitle_lang=pick_subtitle_lang(info, self._languages),
+            live_status=_live_status(info),
         )
 
     def subtitles(self, video_id: str, lang: str) -> str:
-        from yt_dlp import YoutubeDL
-
         with TemporaryDirectory() as tmp:
-            options = self._options(
+            extra = dict(
                 skip_download=True,
                 writesubtitles=True,
                 writeautomaticsub=True,
@@ -175,7 +192,7 @@ class YtDlpClient:
                 subtitlesformat="vtt",
                 outtmpl=str(Path(tmp) / "yt-%(id)s.%(ext)s"),
             )
-            with YoutubeDL(options) as ydl:
+            with self._ydl(**extra) as ydl:
                 ydl.download([_watch_url(video_id)])
             found = sorted(Path(tmp).glob("*.vtt"))
             if not found:
@@ -183,15 +200,25 @@ class YtDlpClient:
             return vtt_to_text(found[0].read_text(encoding="utf-8", errors="replace"))
 
     def audio(self, video_id: str, folder: Path) -> Path:
-        from yt_dlp import YoutubeDL
-
         target = folder / f"yt-{video_id}.%(ext)s"
-        with YoutubeDL(self._options(format="ba[ext=m4a]/ba", outtmpl=str(target))) as ydl:
+        options = {
+            "format": "ba[ext=m4a]/ba",
+            "outtmpl": str(target),
+            "max_filesize": MAX_AUDIO_BYTES,
+        }
+        with self._ydl(**options) as ydl:
             ydl.download([_watch_url(video_id)])
         found = sorted(folder.glob(f"yt-{video_id}.*"))
         if not found:
-            raise RuntimeError("no audio file was written")
+            raise RuntimeError("no audio file was written (it may be over the size limit)")
         return found[0]
+
+
+def _live_status(info: dict) -> str | None:
+    status = info.get("live_status")
+    if isinstance(status, str) and status:
+        return status
+    return "is_live" if info.get("is_live") else None
 
 
 def _one_line(text: str) -> str:
@@ -235,8 +262,10 @@ class YouTubeSource:
         *,
         pause_seconds: float = 2.0,
         sleep: Callable[[float], None] = time.sleep,
+        max_duration_seconds: int | None = DEFAULT_MAX_DURATION_SECONDS,
     ) -> None:
         self._client, self._transcriber = client, transcriber
+        self._max_duration = max_duration_seconds
         self._pause, self._sleep = pause_seconds, sleep
 
     def list_items(self) -> list[InboxRef]:
@@ -245,12 +274,25 @@ class YouTubeSource:
     def fetch(self, ref: InboxRef) -> InboxItem:
         """Metadata, then a transcript from subtitles, else from audio, else none (with a note).
 
-        Only a failure to read the video itself raises; a missing transcript never does.
+        A live or upcoming video is skipped (`ItemSkipped`) and looked at again at the next check.
+        A video over the duration limit gets no transcript, only a note. Only a failure to read the
+        video itself raises; a missing transcript never does.
         """
         info = self._client.video(ref.id)
         self._sleep(self._pause)  # be gentle with YouTube between requests
+        if info.live_status in _NOT_READY:
+            what = info.live_status.removeprefix("is_").replace("_", " ")
+            raise ItemSkipped(f"{what}; it is checked once it has ended")
         notes: list[str] = []
-        transcript, how = self._transcript(info, notes)
+        if self._max_duration and info.duration and info.duration > self._max_duration:
+            notes.append(
+                f"No transcript: the video ({_duration(info.duration)}) is longer than the limit "
+                f"of {self._max_duration // 60} minutes. This Fact-check ran on the title and "
+                "description only."
+            )
+            transcript, how = "", ""
+        else:
+            transcript, how = self._transcript(info, notes)
         if transcript:
             line = f"Transcript: attached as transcript.txt ({how})."
             attachments = (Upload("transcript.txt", transcript.encode("utf-8")),)

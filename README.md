@@ -36,15 +36,22 @@ Save videos into a playlist. `investigate inbox` reads it, and each video it has
 [inbox]
 check_times = ["08:00", "18:00"]   # the tray checks at these local times (default)
 depth = "standard"                 # Depth of the Fact-checks
+max_attempts = 3                   # tries per item before it is given up on (optional)
+max_new_per_check = 10             # new Fact-checks per check; the rest wait (optional)
 
 [inbox.youtube]
 playlist = "PLxxxxxxxxxxxxxxxx"    # a playlist id, or a URL with ?list=
 cookies = "youtube-cookies.txt"    # only for a private playlist (optional)
 subtitle_languages = ["en", "de"]  # preferred subtitle tracks (optional)
+max_duration_minutes = 90          # longer videos get no transcript (optional)
 ```
 
-The playlist is an id or a URL, not a name: looking a playlist up by name needs a logged-in account and the same name can exist twice. A public or unlisted playlist needs nothing more. A private playlist needs `cookies`, a Netscape `cookies.txt` exported from a browser that is logged in to YouTube (yt-dlp cannot read Chrome's cookies on Windows). The file is read, never changed. Keep it out of any repo.
+The playlist is an id or a URL, not a name: looking a playlist up by name needs a logged-in account and the same name can exist twice. A public or unlisted playlist needs nothing more. A private playlist needs `cookies`, a Netscape `cookies.txt` exported from a browser that is logged in to YouTube (yt-dlp cannot read Chrome's cookies on Windows). That is the only way in: the logged-in browser profile of `investigate login` is not used for the inbox. Each check hands yt-dlp a temporary copy of the file (yt-dlp rewrites the cookie file it is given) and deletes the copy afterwards, so your `cookies.txt` is never changed. Keep it out of any repo.
+
+Live and upcoming videos are skipped and looked at again at the next check. A video longer than `max_duration_minutes` is checked on its title and description, with a note in the Report. An item that cannot be fetched is tried `max_attempts` times, then dropped with a line in `inbox/inbox.log`. A Fact-check Run that failed or was cancelled without a Report is queued again, up to `max_attempts` Runs in all; the failed Runs stay in the History.
 
 The transcript comes from the video's subtitles. Without subtitles the audio is transcribed locally, which needs ffmpeg and the `transcribe` extra (`uv sync --extra transcribe`; faster-whisper `small` on the CPU, about 460 MB of model downloaded on first use). Without them the Report and the Run log say so, and the Fact-check runs on the title and description.
 
-The tray runs the check at the `check_times`, once at start-up when a slot was missed while it was off, and on "Check inbox now" in its menu; a toast sums up the new Fact-checks. Fact-checks wait in the same queue as every other Run (`parallel_runs`). `investigate inbox` does one check from the command line and waits for the Fact-checks to finish. Only one check runs at a time.
+A Verdict the agent words differently is mapped (`partly-true`, `mostly true` and `misleading` to Partly true; `false` and `incorrect` to Wrong; `true` and `accurate` to Confirmed; `out of date` to Outdated; `unknown` to Unverified; the full table is `VERDICT_ALIASES` in `result.py`). Any other word becomes Unverified and the Report says so.
+
+The tray runs the check at the `check_times`, once at start-up when a slot was missed while it was off, and on "Check inbox now" in its menu; a toast sums up the new Fact-checks. When the playlist cannot be reached the tray retries after 10, 20, then 40 minutes (never later than the next slot) and toasts the outage once, again if the error changes, and when it is over; "Check inbox now" always answers. Fact-checks wait in the same queue as every other Run (`parallel_runs`). `investigate inbox` does one check from the command line and waits for the Fact-checks to finish. Only one check runs at a time.

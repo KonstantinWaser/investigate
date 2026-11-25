@@ -41,6 +41,7 @@ def _scheduler(home, now, check=None, **kwargs):
         calls.append(manual)
         return True
 
+    kwargs.setdefault("tz", TZ)  # the zone of the fake clock, whatever this machine uses
     scheduler = InboxScheduler(InboxState(home), TIMES, check or default, clock=fake, **kwargs)
     return scheduler, fake, calls
 
@@ -102,10 +103,12 @@ def test_a_failed_check_is_retried_after_the_delay_and_not_recorded(home):
     clk.now = at(4, 8, 5)
     assert scheduler.tick() is False  # still inside the retry delay
     clk.now = at(4, 8, 12)
-    assert scheduler.tick() is True  # second failure
+    assert scheduler.tick() is True  # second failure: the next delay is twice as long
     clk.now = at(4, 8, 23)
+    assert scheduler.tick() is False
+    clk.now = at(4, 8, 33)
     assert scheduler.tick() is True  # success
-    assert InboxState(home).last_check() == at(4, 8, 23)
+    assert InboxState(home).last_check() == at(4, 8, 33)
     clk.now = at(4, 8, 40)
     assert scheduler.tick() is False
 
@@ -263,6 +266,65 @@ def test_an_unreachable_playlist_is_retried_not_recorded_and_toasted(home):
         assert _wait(lambda: any(t.title == "Inbox check had problems" for t in notifier.toasts))
         assert _wait(lambda: not app.inbox.checking)
         assert InboxState(home).last_check() is None
+    finally:
+        app.shutdown()
+
+
+def test_the_unreachable_retry_is_scheduled_with_backoff_up_to_the_next_slot(home):
+    scheduler, clk, _ = _scheduler(home, at(4, 17, 0), lambda manual: False)
+    scheduler.tick()
+    assert scheduler._retry_at == at(4, 17, 10)
+    clk.now = at(4, 17, 10)
+    scheduler.tick()
+    assert scheduler._retry_at == at(4, 17, 30)
+    clk.now = at(4, 17, 30)
+    scheduler.tick()
+    assert scheduler._retry_at == at(4, 18, 0)  # 40 minutes would pass the 18:00 slot
+
+
+def test_an_outage_is_toasted_once_again_when_it_changes_and_on_recovery(home):
+    source = FakeSource(fail_list=OSError("offline"))
+    app, notifier = _tray(home, [source])
+    app.start()
+    try:
+        assert _wait(lambda: any(t.title == "Inbox check had problems" for t in notifier.toasts))
+        assert _wait(lambda: not app.inbox.checking)
+        problems = lambda: [t for t in notifier.toasts if t.title == "Inbox check had problems"]  # noqa: E731
+        for _ in range(3):  # the scheduler's retries while it stays offline
+            app._check_inbox(False)
+        assert len(problems()) == 1
+
+        source.fail_list = OSError("dns failure")  # a different error is news
+        app._check_inbox(False)
+        assert len(problems()) == 2
+        app._check_inbox(False)
+        assert len(problems()) == 2
+
+        app._check_inbox(True)  # a manual check always answers
+        assert len(problems()) == 3
+
+        source.fail_list = None
+        app._check_inbox(False)
+        assert _wait(lambda: any(t.title == "2 new Fact-checks" for t in notifier.toasts))
+        source.fail_list = OSError("offline")
+        app._check_inbox(False)  # a new outage after recovery is toasted again
+        assert len(problems()) == 4
+    finally:
+        app.shutdown()
+
+
+def test_recovery_with_nothing_new_is_toasted_once(home):
+    source = FakeSource(titles=(), fail_list=OSError("offline"))
+    app, notifier = _tray(home, [source])
+    app.start()
+    try:
+        assert _wait(lambda: any(t.title == "Inbox check had problems" for t in notifier.toasts))
+        assert _wait(lambda: not app.inbox.checking)
+        source.fail_list = None
+        app._check_inbox(False)
+        app._check_inbox(False)
+        again = [t for t in notifier.toasts if t.message == "The inbox is reachable again."]
+        assert len(again) == 1
     finally:
         app.shutdown()
 
