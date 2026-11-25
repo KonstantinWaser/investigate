@@ -16,7 +16,7 @@ from urllib.parse import quote, urlparse
 from markdown_it import MarkdownIt
 
 from investigate.attachments import Attachment
-from investigate.result import ParsedResult
+from investigate.result import ParsedResult, parse_result
 
 _md = MarkdownIt("commonmark", {"html": False}).disable("image")
 
@@ -51,11 +51,71 @@ border:1px solid var(--line);border-radius:1rem;padding:0 .5rem;color:var(--mute
 .cites{margin:.5rem 0 0;padding-left:1.2rem;font-size:.9rem}
 .note{color:var(--muted)}
 details{margin-top:1.5rem}
+.followup{border-top:2px solid var(--line);margin-top:2rem}
+.followup blockquote{margin:.5rem 0;padding:.25rem .75rem;border-left:3px solid var(--line);\
+white-space:pre-wrap}
+.followup-box textarea{box-sizing:border-box;width:100%;min-height:5rem;font:inherit;\
+background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:.4rem;\
+padding:.5rem}
+.followup-box button{font:inherit;margin-top:.5rem;padding:.35rem 1rem}
 .thumbs{display:flex;flex-wrap:wrap;gap:.75rem;margin:.5rem 0}
 .thumbs img{max-width:12rem;max-height:9rem;border:1px solid var(--line);border-radius:.4rem}
 pre{white-space:pre-wrap;word-break:break-word;background:var(--card);padding:.75rem;\
 border-radius:.5rem;font-size:.85rem}
 """
+
+
+# Comment markers in report.html. The page is a plain file; the Follow-up sections live between
+# the first two, and the server swaps the third for the ask box (and adds a progress refresh at
+# HEAD_MARK) only while serving, so the file view never shows a dead form.
+FOLLOWUPS_OPEN = "<!--investigate:followups-->"
+FOLLOWUPS_CLOSE = "<!--/investigate:followups-->"
+FOLLOWUP_BOX = "<!--investigate:followup-box-->"
+HEAD_MARK = "<!--investigate:head-->"
+
+
+def render_followups(entries: list[dict]) -> str:
+    """One dated section per stored Follow-up, in the order they were asked."""
+    out = []
+    for n, entry in enumerate(entries, 1):
+        text = entry.get("text") or ""
+        parsed = parse_result(text)
+        structured = parsed.structured
+        parts = [
+            f'<section class="followup" id="followup-{n}">',
+            f"<h2>Follow-up {n}, {escape(str(entry.get('asked', '')))}</h2>",
+            f"<blockquote>{escape(str(entry.get('question', '')))}</blockquote>",
+        ]
+        if entry.get("note"):
+            parts.append(f'<div class="notice">{escape(str(entry["note"]))}</div>')
+        new_run = entry.get("new_run_id")
+        if new_run:
+            href = escape(quote(str(new_run), safe=""), quote=True)
+            parts.append(
+                f'<p>The answer is in a new Run: <a href="/runs/{href}/">'
+                f"{escape(str(new_run))}</a></p>"
+            )
+        status = entry.get("status")
+        if status == "partial":
+            parts.append(f'<div class="notice">{escape(STATUS_NOTES["partial"])}</div>')
+        if status == "failed":
+            error = entry.get("error") or "The Follow-up failed."
+            parts.append(f'<div class="notice bad">Follow-up failed: {escape(str(error))}</div>')
+        if text.strip() and not new_run:
+            if structured:
+                parts.append(f'<p class="summary">{escape(structured.summary)}</p>')
+                parts.append(_findings(parsed, "h3"))
+            else:
+                problems = "".join(f"<li>{escape(p)}</li>" for p in parsed.problems)
+                parts.append(
+                    '<div class="notice bad">The structured answer is missing or malformed, so '
+                    f"the agent's raw text is shown.<ul>{problems}</ul></div>"
+                )
+            if parsed.body:
+                parts.append(_md.render(parsed.body))
+        parts.append("</section>")
+        out.append("".join(parts))
+    return "".join(out)
 
 
 @dataclass(frozen=True)
@@ -88,12 +148,12 @@ def _citations(citations) -> str:
     return f'<ul class="cites">{"".join(rows)}</ul>'
 
 
-def _findings(result: ParsedResult) -> str:
+def _findings(result: ParsedResult, level: str = "h2") -> str:
     structured = result.structured
     if structured is None:
         return ""
     if not structured.findings:
-        return '<h2>Findings</h2><p class="note">The agent reported no findings.</p>'
+        return f'<{level}>Findings</{level}><p class="note">The agent reported no findings.</p>'
     blocks = []
     for f in structured.findings:
         detail = f"<p>{escape(f.detail)}</p>" if f.detail else ""
@@ -103,7 +163,7 @@ def _findings(result: ParsedResult) -> str:
             f'<span class="conf">{escape(f.confidence)} confidence</span></p>'
             f"{detail}{_citations(f.citations)}</div>"
         )
-    return "<h2>Findings</h2>" + "".join(blocks)
+    return f"<{level}>Findings</{level}>" + "".join(blocks)
 
 
 def _relevance(result: ParsedResult, contexts: tuple[str, ...]) -> str:
@@ -183,11 +243,12 @@ def render_report(data: ReportInput) -> str:
         "<!doctype html>\n"
         '<html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>{escape(title)}</title><style>{_CSS}</style></head><body><main>"
+        f"{HEAD_MARK}<title>{escape(title)}</title><style>{_CSS}</style></head><body><main>"
         f"<h1>{escape(title)}</h1>"
         f'<div class="meta">{meta}</div>'
         f"{''.join(notices)}{summary}{_findings(data.result)}"
         f"{_relevance(data.result, data.contexts)}{body_html}"
         f"{_item_section(data.item, data.attachments)}"
+        f"{FOLLOWUPS_OPEN}{FOLLOWUPS_CLOSE}{FOLLOWUP_BOX}"
         "</main></body></html>\n"
     )

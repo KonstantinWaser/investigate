@@ -174,7 +174,12 @@ def _execute_run(
     session_id = str(uuid.uuid4())
 
     def entry(status: str, title: str, sid: str | None) -> history.HistoryEntry:
-        return history.HistoryEntry(run_id, KIND, depth.value, status, title, created, sid)
+        # A Follow-up fallback Run is linked when it is reserved; keep that link on every rewrite.
+        prior = next((e for e in history.load_entries(home) if e.id == run_id), None)
+        link = prior.followup_of if prior else None
+        return history.HistoryEntry(
+            run_id, KIND, depth.value, status, title, created, sid, followup_of=link
+        )
 
     # Recovery after a hard kill tells a dead Run from a live one by this pid.
     (folder / "running.pid").write_text(str(os.getpid()), encoding="utf-8")
@@ -275,6 +280,7 @@ def _execute_run(
                 "model": settings.model,
                 "timeout_minutes": settings.timeout_minutes,
                 "browser": use_browser,
+                "workdir": str(folder),  # the agent's cwd; a Follow-up resumes in the same one
                 "result_problems": list(parsed.problems),
                 "attachments": [{"name": a.name, "size": a.size} for a in stored],
             },

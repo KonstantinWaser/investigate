@@ -22,6 +22,7 @@ from investigate import browser
 from investigate.config import PermissionMode
 
 MCP_CONFIG_NAME = "mcp.json"
+_NO_SESSION = "No conversation found"  # the CLI's message for an unknown session
 
 
 @dataclass(frozen=True)
@@ -44,12 +45,17 @@ class RunnerOutcome:
     session_id: str | None
     log: str  # raw transcript for `agent.log`
     error: str | None = None
+    resume_unavailable: bool = False  # a resume failed because the session is unknown or gone
 
 
 class Runner(Protocol):
     name: str
 
     def run(self, request: RunRequest) -> RunnerOutcome: ...
+
+    def resume(self, request: RunRequest) -> RunnerOutcome:
+        """Continue the agent session `request.session_id` with `request.prompt`."""
+        ...
 
 
 def _rule_path(path: Path) -> str:
@@ -60,14 +66,17 @@ def _rule_path(path: Path) -> str:
     return "/" + posix
 
 
-def build_command(command: list[str], request: RunRequest) -> list[str]:
-    """The full CLI command. The prompt goes in on stdin, not on the command line."""
+def build_command(command: list[str], request: RunRequest, *, resume: bool = False) -> list[str]:
+    """The full CLI command. The prompt goes in on stdin, not on the command line.
+
+    A resume passes `--resume <id>` instead of `--session-id <id>`; the CLI refuses both together.
+    """
     cmd = [
         *command,
         "-p",
         "--output-format",
         "json",
-        "--session-id",
+        "--resume" if resume else "--session-id",
         request.session_id,
         # Our own MCP config and only user-level settings: do not pick up hooks or MCP servers
         # from wherever the user launched us.
@@ -148,6 +157,12 @@ class ClaudeCodeRunner:
         return [found] if found else None
 
     def run(self, request: RunRequest) -> RunnerOutcome:
+        return self._execute(request, resume=False)
+
+    def resume(self, request: RunRequest) -> RunnerOutcome:
+        return self._execute(request, resume=True)
+
+    def _execute(self, request: RunRequest, *, resume: bool) -> RunnerOutcome:
         command = self._resolve()
         if command is None:
             return RunnerOutcome(
@@ -164,7 +179,7 @@ class ClaudeCodeRunner:
         (request.workdir / MCP_CONFIG_NAME).write_text(
             json.dumps({"mcpServers": servers}), encoding="utf-8"
         )
-        argv = build_command(command, request)
+        argv = build_command(command, request, resume=resume)
         try:
             proc = subprocess.Popen(  # noqa: S603
                 argv,
@@ -227,6 +242,7 @@ class ClaudeCodeRunner:
             session_id=session_id or request.session_id,
             log=log + (f"\nERROR: {error}\n" if error else ""),
             error=error,
+            resume_unavailable=resume and error is not None and _NO_SESSION in stdout + stderr,
         )
 
 
