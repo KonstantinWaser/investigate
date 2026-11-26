@@ -35,7 +35,7 @@ from investigate.autostart import Autostart, default_autostart, entry_suffix, st
 from investigate.config import ConfigError, config_path, load_config
 from investigate.instance import holds_lock, running_url
 from investigate.runner import console_flags
-from investigate.setup import _edit_config
+from investigate.setup import edit_config
 
 SHORTCUT_NAME = "investigate"
 UNINSTALL_NAME = "Uninstall investigate"
@@ -352,7 +352,7 @@ def run_first_run(home: Path, io: InstallIO | None = None) -> int:
         return 2
     try:
         load_config(home)  # creates the default file only when it is absent
-        config = _edit_config(home, lambda doc: doc.__setitem__("start_at_login", True))
+        config = edit_config(home, lambda doc: doc.__setitem__("start_at_login", True))
     except ConfigError as exc:
         io.say(f"error: {exc}")
         io.say(f"Fix {config_path(home)} by hand (or delete it to start over); nothing was done.")
