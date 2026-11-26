@@ -44,6 +44,7 @@ if not defined TOOLBIN goto fail
 if not exist "%TOOLBIN%\investigate.exe" goto install_tool
 echo Updating. Quitting investigate first if it is running.
 "%TOOLBIN%\investigate.exe" stop-tray
+if errorlevel 2 goto install_tool
 if errorlevel 1 goto tray_stays
 :install_tool
 uv tool install --force --refresh "investigate[tray,transcribe,instagram] @ https://github.com/KonstantinWaser/investigate/archive/refs/heads/main.zip"

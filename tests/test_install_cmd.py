@@ -99,8 +99,11 @@ def test_it_stops_a_running_tray_before_it_replaces_the_program():
     assert r'if not exist "%TOOLBIN%\investigate.exe"' in guard  # a first install has no program
     argv = line.split(".exe", 1)[1].replace('"', "").split()
     assert cli._parser().parse_args(argv).command == "stop-tray"
-    after = TEXT.splitlines()[stop + 1]
-    assert "errorlevel 1" in after and "goto tray_stays" in after
+    # stop-tray returns 0 or 1. An older install has no stop-tray (argparse exits 2) and a broken
+    # one fails to start; both go on to the install instead of asking to quit the tray forever.
+    older, stays = TEXT.splitlines()[stop + 1 : stop + 3]
+    assert "errorlevel 2" in older and "goto install_tool" in older
+    assert "errorlevel 1" in stays and "goto tray_stays" in stays
     assert "choose quit" in TEXT.lower()
 
 
