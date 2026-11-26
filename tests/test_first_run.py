@@ -475,3 +475,18 @@ def test_uninstall_deletes_a_folder_the_setup_page_and_login_wrote_to(tmp_path, 
     world = World(tmp_path)
     _answer_yes_to_all(world, folder)
     assert gone == [folder]
+
+
+def test_the_default_uninstall_shortcut_parses_for_the_default_home():
+    from investigate.config import default_home
+    from investigate.firstrun import InstallIO
+
+    command = InstallIO().uninstall_command(default_home())
+    args = (
+        command[command.index("investigate.cli") + 1 :]
+        if "investigate.cli" in command
+        else command[1:]
+    )
+    assert "--home" not in args
+    parsed = cli._parser().parse_args(args)
+    assert parsed.command == "uninstall" and parsed.pause and parsed.home is None

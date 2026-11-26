@@ -141,6 +141,9 @@ def _browser(s: SetupStatus) -> str:
     if s.browser_login_running:
         body = "<p>The login window is open. Log in, then close it.</p>"
         return _step("Browser profile", False, body, no="Login open")
+    if s.browser_profile_busy and not s.browser_logged_in:
+        body = "<p>The browser profile is in use (a Run or another window). Try again later.</p>"
+        return _step("Browser profile", False, body, no="In use")
     if not s.browser_logged_in:
         body = (
             "<p>Chrome is installed. Log in once to YouTube, Instagram and X so Runs and the "
@@ -216,7 +219,8 @@ def _autostart(s: SetupStatus) -> str:
 def _refresh(s: SetupStatus, did: str, tick: int) -> str:
     waiting = {
         "claude-login": s.agent.installed and s.agent.logged_in is not True,
-        "browser-login": s.chrome and (s.browser_login_running or not s.browser_logged_in),
+        "browser-login": s.chrome
+        and (s.browser_login_running or s.browser_profile_busy or not s.browser_logged_in),
         "ffmpeg": not s.ffmpeg,
     }.get(did, False)
     if not waiting or tick >= MAX_REFRESHES:
