@@ -204,6 +204,7 @@ class TrayApp:
             MenuItem("Check inbox now", self.on_check_inbox),
             MenuItem("Log in to sites", self.on_login),
             MenuItem("Settings", self.on_settings),
+            MenuItem("Setup", self.on_setup),
             MenuItem("Quit", self.on_quit),
         ]
 
@@ -215,6 +216,9 @@ class TrayApp:
 
     def on_settings(self) -> None:
         self._open_url(self._settings_url())
+
+    def on_setup(self) -> None:
+        self._open_url(f"{self.server.url}setup")
 
     def _settings_url(self) -> str:
         return f"{self.server.url}settings"

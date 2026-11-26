@@ -39,7 +39,9 @@ Each extra is optional: `tray` (icon, quick capture, toasts, hotkey), `transcrib
 uv run investigate setup
 ```
 
-Setup walks through, in order: whether the `claude` CLI is installed and logged in, the data folder and `config.toml`, Context files, the optional extras (transcription needs ffmpeg), the browser login, start at login, and on Windows a hint to drag the tray icon out of the overflow area. Every question defaults to no, an existing `config.toml` or Context file is never overwritten, and running it again changes nothing unless you answer differently. The login check runs `claude auth status`, which makes no model call. If that command gives no answer, setup says "login not verified" and does not spend a model call to find out.
+Setup walks through, in order: whether the `claude` CLI is installed and logged in, the data folder and `config.toml`, Context files, the optional extras (transcription needs ffmpeg), the browser login, start at login, and on Windows a hint to drag the tray icon out of the overflow area. Every question defaults to no, an existing `config.toml` or Context file is never overwritten, and running it again changes nothing unless you answer differently. The login check runs `claude auth status`, which makes no model call. If that command gives no answer, setup says "login not verified" and does not spend a model call to find out (it runs with stdin closed and a timeout).
+
+The same steps are on a page in the browser, no terminal needed: the tray menu's Setup item opens `http://127.0.0.1:8765/setup`. Each step shows its status and one action: log in to Claude Code, upload Context files (copied into `contexts/` in the data folder; a file that already exists is kept unless you tick Replace), log in the browser profile, set the YouTube playlist and the Instagram Collection, install ffmpeg with winget, and switch start at login. A button that starts a program (`claude auth login`, `winget install`, the Chrome login) opens it in its own window and the page reloads until it is done. After the ffmpeg install, restart Investigate so it sees the new PATH.
 
 Then try a first Run and open the Report it prints:
 

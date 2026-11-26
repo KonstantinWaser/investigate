@@ -287,3 +287,47 @@ def test_context_file_with_a_blank_name_is_reported_not_raised(home, tmp_path):
     io = FakeIO([str(odd), ""])
     assert run_setup(home, io.build()) == 0
     assert load_config(home).contexts == ()
+
+
+# the login check can never start a model session
+
+
+def test_status_check_closes_stdin_and_has_a_timeout(monkeypatch):
+    import subprocess
+
+    from investigate import setup
+
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs, argv=argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=LOGGED_IN, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert setup._run(["claude", "auth", "status"]) == (0, LOGGED_IN)
+    assert seen["stdin"] is subprocess.DEVNULL
+    assert seen["timeout"] == setup.STATUS_TIMEOUT_SECONDS
+
+
+def test_status_that_times_out_or_is_not_json_is_unverified():
+    import subprocess
+
+    from investigate.setup import agent_status
+
+    def hangs(argv):
+        raise subprocess.TimeoutExpired(argv, 20)
+
+    for run in (hangs, lambda argv: (0, "not json"), lambda argv: (0, "[1]"), lambda argv: (0, "")):
+        io = replace(FakeIO().build(), run=run)
+        status = agent_status(io)
+        assert status.installed and status.logged_in is None
+
+
+def test_agent_status_reads_logged_in_and_out_and_missing():
+    from investigate.setup import agent_status
+
+    assert agent_status(FakeIO().build()).logged_in is True
+    out = FakeIO(status=(0, json.dumps({"loggedIn": False}))).build()
+    assert agent_status(out).logged_in is False
+    missing = agent_status(FakeIO(claude=None).build())
+    assert not missing.installed and missing.logged_in is None

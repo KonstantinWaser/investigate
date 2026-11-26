@@ -8,7 +8,7 @@ Public GitHub repo under the owner's personal account, MIT. Anyone can clone it 
 
 ## Host and input
 
-- A tray app (`pystray`) starts at login and hosts the local web server (Python, `uv`) and the scheduler. Menu: New, History, Check inbox now, Log in to sites, Settings, Quit.
+- A tray app (`pystray`) starts at login and hosts the local web server (Python, `uv`) and the scheduler. Menu: New, History, Check inbox now, Log in to sites, Settings, Setup, Quit.
 - Left click on the tray icon, or `Ctrl+Alt+I` (configurable), opens a quick-capture popup: one box taking text, URLs, pasted images and dropped files, a Depth picker, Submit. It closes on submit.
 - History and Reports open in a full window.
 - On Windows 11 the new tray icon lands in the overflow; the user drags it out once.

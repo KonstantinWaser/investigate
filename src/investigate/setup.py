@@ -8,7 +8,12 @@ start a browser or call the real `claude`. Rules the steps keep:
   by one question's answer); a Context file that is there is only listed in the config.
 - Every question defaults to the safe answer: no. End of input counts as no.
 - A second run with no new answers changes nothing.
-- The agent CLI's login is checked with `claude auth status`, which makes no model call.
+- The agent CLI's login is checked with `claude auth status`, which makes no model call. It runs
+  with stdin closed and a timeout, so even an older CLI that treats the unknown subcommand as a
+  prompt cannot wait for input or start a session.
+
+The checks (`agent_status`, the install links, the ffmpeg command) are shared with the browser
+setup page in `setupweb.py`.
 """
 
 from __future__ import annotations
@@ -30,6 +35,10 @@ from investigate.config import Config, ConfigError, config_path, load_config, va
 from investigate.settings import _write_atomically
 
 STATUS_TIMEOUT_SECONDS = 20
+CLAUDE_INSTALL_URL = "https://code.claude.com/docs/en/setup"
+CHROME_URL = "https://www.google.com/chrome/"
+FFMPEG_URL = "https://ffmpeg.org/download.html"
+FFMPEG_WINGET_ID = "Gyan.FFmpeg"  # `winget show --id Gyan.FFmpeg`: the gyan.dev full build
 STARTER_CONTEXT = """\
 # About my work
 
@@ -48,6 +57,7 @@ def _run(argv: list[str]) -> tuple[int, str]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        stdin=subprocess.DEVNULL,
         timeout=STATUS_TIMEOUT_SECONDS,
         check=False,
         **console_flags(),
@@ -90,29 +100,59 @@ def _step(io: SetupIO, title: str) -> None:
     io.say(f"\n== {title}")
 
 
-def _check_agent_cli(io: SetupIO) -> bool:
-    """True when the CLI is installed. The login is read from `claude auth status`."""
-    _step(io, "Agent CLI")
+@dataclass(frozen=True)
+class AgentStatus:
+    installed: bool
+    path: str | None = None
+    logged_in: bool | None = None  # None: could not be verified
+    code: int = 0  # exit code of `claude auth status`, when it ran
+
+
+def agent_status(io: SetupIO) -> AgentStatus:
+    """Is the CLI installed, and is it logged in (`claude auth status`, JSON by default)."""
     found = io.which("claude")
     if found is None:
-        io.say(
-            "The 'claude' command was not found on PATH. Install Claude Code "
-            "(https://docs.claude.com/en/docs/claude-code/setup), then run setup again."
-        )
-        return False
-    io.say(f"Found Claude Code at {found}.")
+        return AgentStatus(False)
     try:
         code, out = io.run([found, "auth", "status"])
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError):  # includes a timeout
         code, out = -1, ""
     try:
         data = json.loads(out)
         logged_in = data.get("loggedIn") if isinstance(data, dict) else None
     except json.JSONDecodeError:
         logged_in = None
-    if logged_in is True:
+    return AgentStatus(True, found, logged_in if isinstance(logged_in, bool) else None, code)
+
+
+def ffmpeg_install_command() -> list[str]:
+    return [
+        "winget",
+        "install",
+        "--id",
+        FFMPEG_WINGET_ID,
+        "--exact",
+        "--source",
+        "winget",
+        "--accept-package-agreements",
+        "--accept-source-agreements",
+    ]
+
+
+def _check_agent_cli(io: SetupIO) -> bool:
+    """True when the CLI is installed. The login is read from `claude auth status`."""
+    _step(io, "Agent CLI")
+    status = agent_status(io)
+    if not status.installed:
+        io.say(
+            f"The 'claude' command was not found on PATH. Install Claude Code "
+            f"({CLAUDE_INSTALL_URL}), then run setup again."
+        )
+        return False
+    io.say(f"Found Claude Code at {status.path}.")
+    if status.logged_in is True:
         io.say("Installed and logged in.")
-    elif logged_in is False:
+    elif status.logged_in is False:
         io.say(
             "Installed, but not logged in. Run `claude auth login`. If you use an API key or a "
             "cloud provider (Bedrock, Vertex) or a proxy through environment variables, this "
@@ -121,7 +161,7 @@ def _check_agent_cli(io: SetupIO) -> bool:
     else:
         io.say(
             f"Installed, login not verified (`claude auth status` gave no answer, exit code "
-            f"{code}). Run `claude` once on its own to check that you can sign in."
+            f"{status.code}). Run `claude` once on its own to check that you can sign in."
         )
     return True
 
@@ -145,16 +185,24 @@ def _check_config(io: SetupIO, home: Path) -> Config | None:
     return config
 
 
-def _edit_config(home: Path, edit: Callable[[tomlkit.TOMLDocument], None]) -> Config:
+def edit_config(
+    home: Path,
+    edit: Callable[[tomlkit.TOMLDocument], None],
+    check: Callable[[dict], None] | None = None,
+) -> Config:
     """Apply `edit` to the file's text (comments and layout kept), check the result is valid, and
-    replace the file atomically."""
+    replace the file atomically. `check` gets the edited file as data and raises ConfigError for
+    a rule `validate_raw` does not cover (the `[inbox]` section)."""
     path = config_path(home)
     doc = tomlkit.parse(path.read_bytes().decode("utf-8"))
     edit(doc)
     out = tomlkit.dumps(doc)
-    config, problems = validate_raw(tomllib.loads(out), home)
+    raw = tomllib.loads(out)
+    config, problems = validate_raw(raw, home)
     if problems:
         raise ConfigError(f"refusing to write an invalid config: {next(iter(problems.values()))}")
+    if check is not None:
+        check(raw)
     _write_atomically(path, out)
     return config
 
@@ -171,7 +219,7 @@ def _add_context(home: Path, name: str, path: Path) -> Config:
         row["path"] = str(path)
         entries.append(row)
 
-    return _edit_config(home, edit)
+    return edit_config(home, edit)
 
 
 def _contexts(io: SetupIO, home: Path, config: Config) -> Config:
@@ -236,7 +284,7 @@ def _extras(io: SetupIO) -> None:
 
 
 def _set_flag(home: Path, key: str) -> Config:
-    return _edit_config(home, lambda doc: doc.__setitem__(key, True))
+    return edit_config(home, lambda doc: doc.__setitem__(key, True))
 
 
 def _browser(io: SetupIO, home: Path, config: Config) -> Config:
