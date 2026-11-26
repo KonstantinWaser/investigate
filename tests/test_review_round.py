@@ -72,9 +72,10 @@ def test_default_autostart_names_files_per_home(tmp_path):
 
 def test_the_command_carries_a_non_default_home(tmp_path):
     custom = tmp_path / "data"
-    assert startup_command(sys.executable, home=custom)[-3:] == ["tray", "--home", str(custom)]
-    assert "--home" not in startup_command(sys.executable, home=default_home())
-    assert "--home" not in startup_command(sys.executable)
+    python = tmp_path / "bin" / "python"  # no gui-script next to it: the module form
+    assert startup_command(str(python), home=custom)[-3:] == ["tray", "--home", str(custom)]
+    assert "--home" not in startup_command(str(python), home=default_home())
+    assert "--home" not in startup_command(str(python))
 
 
 def test_tray_takes_a_home_option_and_names_its_entry_after_it(tmp_path, monkeypatch):

@@ -11,6 +11,7 @@ from investigate import browser, history
 from investigate.attachments import AttachmentError
 from investigate.autostart import default_autostart, entry_suffix
 from investigate.config import ConfigError, Depth, data_home, load_config
+from investigate.firstrun import run_first_run, run_uninstall
 from investigate.hotkeys import default_hotkeys
 from investigate.inbox import (
     InboxConfig,
@@ -53,6 +54,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("history", help="List past Runs.")
     sub.add_parser("setup", help="Guided first-time setup. Safe to run again.")
+    first = sub.add_parser(
+        "first-run",
+        help="After install: Start menu shortcuts, start at login, start the tray, open setup.",
+    )
+    uninstall = sub.add_parser(
+        "uninstall", help="Remove the shortcuts, start at login and the program. Keeps your data."
+    )
+    uninstall.add_argument("--yes", action="store_true", help="Skip the first question.")
+    for command in (first, uninstall):
+        command.add_argument("--home", type=Path, help="Data folder (default: the usual one).")
     sub.add_parser("login", help="Open the browser profile to log in to YouTube, Instagram, X.")
     tray = sub.add_parser("tray", help="Run the tray app: icon, quick capture and the server.")
     tray.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port (default 8765).")
@@ -175,6 +186,12 @@ def main(
         )
     if args.command == "setup":
         return run_setup(home)
+    if args.command in ("first-run", "uninstall"):
+        if args.home:
+            home = args.home.expanduser().resolve()
+        if args.command == "first-run":
+            return run_first_run(home)
+        return run_uninstall(home, assume_yes=args.yes)
     if args.command == "login":
         return browser.login(home)
     if args.command == "tray":
@@ -224,6 +241,12 @@ def main(
     print(f"{result.status}: {result.title}")
     print(f"Report: {result.report_path}")
     return 1 if result.status == "failed" else 0
+
+
+def tray_main() -> int:
+    """The `investigate-tray` gui-script: runs under pythonw, so no console window opens.
+    Takes the options of `investigate tray` (`--port`, `--home`)."""
+    return main(["tray", *sys.argv[1:]])
 
 
 if __name__ == "__main__":

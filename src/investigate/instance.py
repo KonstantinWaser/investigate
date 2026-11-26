@@ -53,6 +53,15 @@ class InstanceLock:
         self._handle = None
 
 
+def holds_lock(home: Path) -> bool:
+    """True when another process holds the host lock (a tray or `serve` is running)."""
+    lock = InstanceLock(home)
+    if lock.acquire():
+        lock.release()
+        return False
+    return True
+
+
 def running_url(home: Path) -> str | None:
     """The URL the running tray published, if it has got that far."""
     try:
