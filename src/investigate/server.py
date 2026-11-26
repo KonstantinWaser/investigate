@@ -27,6 +27,7 @@ from email.parser import BytesParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from investigate import history
@@ -47,12 +48,29 @@ from investigate.settings import (
     state_from_raw,
 )
 from investigate.settingspage import settings_csp, settings_page
+from investigate.setuppage import setup_csp, setup_page
+from investigate.setupweb import (
+    MAX_CONTEXT_BYTES,
+    MAX_CONTEXT_FILES,
+    SetupActions,
+    SetupError,
+    add_contexts,
+    gather_status,
+    set_browser,
+    set_inbox,
+    set_start_at_login,
+    start_browser_login,
+    start_claude_login,
+    start_ffmpeg_install,
+)
 from investigate.webpages import Filters, apply_filters, history_page
 
 DEFAULT_PORT = 8765
 MAX_FILES = 10  # per submission
-SETTINGS_BODY_CAP = 256 * 1024  # the Settings form is a few KB of text
 BODY_MARGIN = 1024 * 1024  # room for the text, URLs and multipart framing
+SETTINGS_BODY_CAP = 256 * 1024  # the Settings form is a few KB of text
+SETUP_BODY_CAP = 64 * 1024  # a setup form without files
+SETUP_UPLOAD_CAP = MAX_CONTEXT_FILES * MAX_CONTEXT_BYTES + BODY_MARGIN
 ATTACHMENTS_DIR = "attachments"
 _INLINE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -120,6 +138,30 @@ def parse_submission(content_type: str, body: bytes) -> tuple[str, list[str], st
     return text, urls, depth, files
 
 
+def parse_multipart(
+    content_type: str, body: bytes
+) -> tuple[dict[str, str], list[tuple[str, bytes]]]:
+    """(text fields, files) of a multipart/form-data body. A file input left empty (the browser
+    sends a part with an empty file name) is not a file."""
+    if content_type.split(";")[0].strip().lower() != "multipart/form-data":
+        raise SubmitError("send multipart/form-data")
+    raw = f"Content-Type: {content_type}\r\n\r\n".encode() + body
+    msg = BytesParser(policy=email.policy.HTTP).parsebytes(raw)
+    if not msg.is_multipart():
+        raise SubmitError("malformed multipart body")
+    fields: dict[str, str] = {}
+    files: list[tuple[str, bytes]] = []
+    for part in msg.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        filename = part.get_filename()
+        payload = part.get_payload(decode=True) or b""
+        if filename:
+            files.append((filename, payload))
+        elif filename is None and isinstance(name, str):
+            fields[name] = payload.decode("utf-8", "replace")
+    return fields, files
+
+
 def request_allowed(headers, *, state_changing: bool, allow_remote: bool) -> bool:
     """Host must be a loopback name unless remote is allowed. For a state-changing request a
     browser's Origin must equal the Host; without an Origin, a browser-sent Sec-Fetch-Site must be
@@ -168,6 +210,7 @@ class HistoryServer:
         max_parallel: int | None = None,
         on_finished: Callable[[FinishedRun], None] | None = None,
         on_config_changed: Callable[[Config], None] | None = None,
+        setup: SetupActions | None = None,
     ) -> None:
         if not allow_remote and not is_loopback(host):
             raise ValueError(
@@ -190,6 +233,7 @@ class HistoryServer:
         # Called with the new Config after Settings saved it. The queue is already resized.
         self.on_config_changed = on_config_changed
         self._limit_pinned = max_parallel is not None
+        self.setup = setup or SetupActions()  # the setup page's outside effects (fakes in tests)
         self._settings_lock = threading.Lock()
         self._connections: set[socket.socket] = set()
         self._ops = threading.RLock()  # delete and Follow-up start check and act as one step
@@ -291,6 +335,19 @@ class HistoryServer:
             if self.on_config_changed is not None:
                 try:
                     self.on_config_changed(result.config)
+                except Exception:  # a broken listener must not turn a saved file into an error
+                    pass
+            return result
+
+    def edit_setup_config(self, edit: Callable[[], Any]) -> Any:
+        """Run a setup page's config write under the Settings lock, then tell the tray (hotkey,
+        start at login) like a Settings save does."""
+        with self._settings_lock:
+            result = edit()
+            if self.on_config_changed is not None:
+                try:
+                    config = result if isinstance(result, Config) else load_config(self.home)
+                    self.on_config_changed(config)
                 except Exception:  # a broken listener must not turn a saved file into an error
                     pass
             return result
@@ -602,6 +659,9 @@ class _Handler(BaseHTTPRequestHandler):
         if url.path == "/settings":
             self._settings_get(parse_qs(url.query))
             return
+        if url.path == "/setup":
+            self._setup_get(parse_qs(url.query))
+            return
         if url.path == "/capture":
             self._send(
                 HTTPStatus.OK,
@@ -659,7 +719,15 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._guard(state_changing=True):
             return
         path = urlsplit(self.path).path
-        body = self._read_body(SETTINGS_BODY_CAP if path == "/settings" else None)
+        if path == "/settings":
+            cap = SETTINGS_BODY_CAP
+        elif path == "/setup/contexts":
+            cap = SETUP_UPLOAD_CAP
+        elif path.startswith("/setup/"):
+            cap = SETUP_BODY_CAP
+        else:
+            cap = None
+        body = self._read_body(cap)
         if body is None:
             return
         if path == "/api/runs":
@@ -677,6 +745,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/settings":
             self._settings_post(body)
+            return
+        if path.startswith("/setup/"):
+            self._setup_post(path.removeprefix("/setup/"), body)
             return
         match = re.fullmatch(r"/runs/([^/]+)/followup", path)
         if match:
@@ -778,6 +849,71 @@ class _Handler(BaseHTTPRequestHandler):
             )
         else:
             self._redirect("/settings?saved=1")
+
+    def _setup_html(self, status: int, page: str) -> None:
+        self._send(
+            status,
+            page.encode(),
+            "text/html; charset=utf-8",
+            {"Content-Security-Policy": setup_csp()},
+        )
+
+    def _setup_error(self, message: str) -> None:
+        self._setup_html(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            setup_page(gather_status(self.app.home, self.app.setup), error=message),
+        )
+
+    def _setup_get(self, query: dict) -> None:
+        did = (query.get("did") or [""])[0]
+        tick = (query.get("t") or ["0"])[0]
+        self._setup_html(
+            HTTPStatus.OK,
+            setup_page(
+                gather_status(self.app.home, self.app.setup, refresh=did == "claude-login"),
+                did=did,
+                tick=int(tick) if tick.isdigit() and len(tick) < 6 else 0,
+            ),
+        )
+
+    def _setup_post(self, action: str, body: bytes) -> None:
+        home, actions = self.app.home, self.app.setup
+        try:
+            if action == "contexts":
+                fields, files = parse_multipart(self.headers.get("Content-Type", ""), body)
+                replace = "replace" in fields
+                outcomes = self.app.edit_setup_config(lambda: add_contexts(home, files, replace))
+                self._setup_html(
+                    HTTPStatus.OK,
+                    setup_page(gather_status(home, actions), outcomes=outcomes),
+                )
+                return
+            form = parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True)
+            if action == "claude-login":
+                start_claude_login(actions)
+            elif action == "browser-login":
+                start_browser_login(home, actions)
+            elif action == "ffmpeg":
+                start_ffmpeg_install(actions)
+            elif action == "inbox":
+                playlist, collection = (form.get(k, [""])[0] for k in ("playlist", "collection"))
+                self.app.edit_setup_config(lambda: set_inbox(home, playlist, collection))
+            elif action == "autostart":
+                on = "start_at_login" in form
+                self.app.edit_setup_config(lambda: set_start_at_login(home, on))
+            elif action == "browser-flag":
+                on = "browser" in form
+                self.app.edit_setup_config(lambda: set_browser(home, on))
+            else:
+                self._text(HTTPStatus.NOT_FOUND, "not found")
+                return
+        except (SetupError, SubmitError) as exc:
+            self._setup_error(str(exc))
+            return
+        except OSError as exc:
+            self._setup_error(f"Could not do that: {exc}")
+            return
+        self._redirect(f"/setup?did={action}")
 
     def _delete(self, run_id: str, *, redirect: bool) -> None:
         result = self.app.delete(run_id)

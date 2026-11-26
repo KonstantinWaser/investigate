@@ -150,13 +150,19 @@ def _positive_int(section: dict, key: str, default: int, path: Path, where: str)
 
 def load_inbox_config(home: Path) -> InboxConfig:
     """The `[inbox]` section of config.toml. Absent means defaults and no playlist."""
-    from investigate.youtube import PlaylistError, playlist_url
-
     path = config_path(home)
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     except (tomllib.TOMLDecodeError, OSError) as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
+    return parse_inbox_config(raw, path)
+
+
+def parse_inbox_config(raw: dict, path: Path) -> InboxConfig:
+    """The rules for `[inbox]`, shared by `load_inbox_config` and the setup page. Raises
+    ConfigError, its message starting with `path`."""
+    from investigate.youtube import PlaylistError, playlist_url
+
     section = raw.get("inbox", {})
     if not isinstance(section, dict):
         raise ConfigError(f"{path}: inbox must be a table")
