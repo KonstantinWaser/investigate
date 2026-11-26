@@ -14,6 +14,9 @@ dependencies = [
 [project.scripts]
 investigate = "investigate.cli:main"
 
+[project.gui-scripts]
+investigate-tray = "investigate.cli:tray_main"
+
 [project.optional-dependencies]
 tray = [
     "pillow>=13.0.0",

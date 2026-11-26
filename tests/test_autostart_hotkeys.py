@@ -127,8 +127,10 @@ def test_default_autostart_picks_the_entry_for_the_platform_inside_the_given_hom
     assert default_autostart("plan9", tmp_path, {}) is None
 
 
-def test_the_startup_command_runs_this_interpreter_as_a_module():
-    command = startup_command(sys.executable)
+def test_the_startup_command_runs_this_interpreter_as_a_module(tmp_path):
+    # In a folder without the `investigate-tray` script (the installed one is in the real venv).
+    python = tmp_path / "python.exe"
+    command = startup_command(str(python))
     assert command[1:] == ["-m", "investigate.cli", "tray"]
     assert command[0].lower().endswith(("python.exe", "pythonw.exe", "python", "python3"))
     assert startup_command("C:\\x\\python3.12.exe")[0] == "C:\\x\\python3.12.exe"

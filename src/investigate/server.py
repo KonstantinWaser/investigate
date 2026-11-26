@@ -211,6 +211,7 @@ class HistoryServer:
         on_finished: Callable[[FinishedRun], None] | None = None,
         on_config_changed: Callable[[Config], None] | None = None,
         setup: SetupActions | None = None,
+        on_quit: Callable[[], None] | None = None,
     ) -> None:
         if not allow_remote and not is_loopback(host):
             raise ValueError(
@@ -232,6 +233,8 @@ class HistoryServer:
         self.on_finished = on_finished
         # Called with the new Config after Settings saved it. The queue is already resized.
         self.on_config_changed = on_config_changed
+        # `POST /api/quit` calls this (the tray's Quit), so `uninstall` can stop a windowless tray.
+        self.on_quit = on_quit
         self._limit_pinned = max_parallel is not None
         self.setup = setup or SetupActions()  # the setup page's outside effects (fakes in tests)
         self._settings_lock = threading.Lock()
@@ -748,6 +751,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/setup/"):
             self._setup_post(path.removeprefix("/setup/"), body)
+            return
+        if path == "/api/quit" and self.app.on_quit is not None:
+            self._json(HTTPStatus.ACCEPTED, {"quitting": True})
+            threading.Thread(target=self.app.on_quit, daemon=True).start()
             return
         match = re.fullmatch(r"/runs/([^/]+)/followup", path)
         if match:

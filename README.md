@@ -166,6 +166,14 @@ Opens a dedicated Chrome profile (`browser-profile/` in the data folder, never i
 
 The quick-capture hotkey is `ctrl+alt+i` by default (`hotkey` in `config.toml`, modifiers ctrl, alt, shift, win plus a letter, digit or F1 to F24; empty turns it off). On Windows it uses `RegisterHotKey`, which reports a combination another program already holds. Elsewhere it uses `pynput`, which cannot tell a conflict.
 
+### Windows without a console: `first-run` and `uninstall`
+
+`investigate first-run` is what an installer runs after `uv tool install "investigate[tray]"`. It creates two Start menu shortcuts (`investigate`, which starts the tray, and `Uninstall investigate`), turns on start at login, starts the tray with no console window (nothing happens when a tray already runs) and opens the setup page in your browser. Running it again creates nothing new, starts no second tray and never replaces your `config.toml`. If the tray does not come up within 20 seconds it says so instead of opening a dead page.
+
+The tray starts through `investigate-tray`, a Windows GUI program (a `[project.gui-scripts]` entry), so the shortcut and the login entry open no console. `uv tool install` puts it next to `investigate.exe` in the tool's `Scripts` folder and links both into uv's bin folder; the shortcuts and the login entry point at the `Scripts` copy, which does not move.
+
+`investigate uninstall` (or the `Uninstall investigate` shortcut) asks once, quits the tray through its own Quit, removes the login entry and both shortcuts, and keeps your data folder unless you answer yes to a second, separate question (default no; it only deletes a folder that looks like an investigate data folder). The program itself is removed by `uv tool uninstall investigate`, run by a detached process after the command exits, because uv cannot delete an `investigate.exe` that is still running. `--yes` skips the first question only.
+
 ## 10. macOS and Linux notes
 
 The author uses and tests Windows 11. The macOS and Linux paths are written to the platform documentation and covered by headless tests with fakes, but have not been run on real machines. Expect rough edges and please report them.

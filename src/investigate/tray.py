@@ -154,6 +154,7 @@ class TrayApp:
             port=port,
             on_finished=self._on_finished,
             on_config_changed=self.apply_config,
+            on_quit=self.on_quit,
         )
         self._inbox_sources = inbox_sources or (lambda config: default_sources(config, home))
         self._clock, self._inbox_poll = clock, inbox_poll_seconds

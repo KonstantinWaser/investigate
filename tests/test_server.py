@@ -709,3 +709,23 @@ def test_chunked_bodies_are_refused_and_the_connection_closed(home, server):
     reply = _raw_exchange(server.port, head + b"0\r\n\r\n" + _smuggled_submit(server.port))
     assert reply.startswith(b"HTTP/1.1 501 ")
     assert reply.count(b"HTTP/1.1 ") == 1
+
+
+def test_quit_endpoint_calls_the_tray_quit_and_is_origin_checked(home):
+    import threading
+
+    quit_called = threading.Event()
+    srv = HistoryServer(home, FakeRunner(), port=0, on_quit=quit_called.set)
+    srv.start()
+    try:
+        client = Client(srv)
+        assert client.request("POST", "/api/quit", b"", {"Origin": "http://evil.example"})[0] == 403
+        assert not quit_called.is_set()
+        assert client.post("/api/quit")[0] == 202
+        assert quit_called.wait(5)
+    finally:
+        srv.stop()
+
+
+def test_quit_endpoint_is_absent_without_a_tray(server):
+    assert Client(server).post("/api/quit")[0] == 404

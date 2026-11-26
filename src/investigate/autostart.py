@@ -78,14 +78,19 @@ def startup_command(executable: str | None = None, home: Path | None = None) -> 
     """How a login starts the tray: this interpreter, without a console window on Windows, on
     `home` when that is not the default data folder."""
     exe = Path(executable or sys.executable)
+    suffix = ["--home", str(Path(home).expanduser().resolve())] if entry_suffix(home) else []
+    # An install puts the `investigate-tray` gui-script next to its interpreter. It is the
+    # windowless entry point, so a login start opens no console.
+    script = exe.with_name(
+        "investigate-tray.exe" if sys.platform == "win32" else "investigate-tray"
+    )
+    if script.is_file():
+        return [str(script), *suffix]
     if sys.platform == "win32" and exe.name.lower() == "python.exe":
         windowless = exe.with_name("pythonw.exe")
         if windowless.is_file():
             exe = windowless
-    command = [str(exe), "-m", "investigate.cli", "tray"]
-    if home is not None and entry_suffix(home):
-        command += ["--home", str(Path(home).expanduser().resolve())]
-    return command
+    return [str(exe), "-m", "investigate.cli", "tray", *suffix]
 
 
 class WindowsRunKey(Autostart):
