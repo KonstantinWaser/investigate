@@ -450,6 +450,19 @@ def _delete_data_folder(io: InstallIO, home: Path) -> None:
         io.say(f"Deleted {home}")
 
 
+def run_stop_tray(home: Path, io: InstallIO | None = None) -> int:
+    """Quit a running tray so its program files can be replaced (`install.cmd` runs this before
+    an update). Silent and 0 when no tray runs; 1, with what to do, when it stays."""
+    io = io or InstallIO()
+    if not io.tray_running(home):
+        return 0
+    io.say("Quitting the running tray so it can be updated...")
+    if io.stop_tray(home):
+        return 0
+    io.say("The tray did not quit. Quit it from its menu (or Task Manager) and run this again.")
+    return 1
+
+
 def run_uninstall(
     home: Path, io: InstallIO | None = None, *, assume_yes: bool = False, pause: bool = False
 ) -> int:

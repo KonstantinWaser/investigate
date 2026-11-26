@@ -84,3 +84,37 @@ def test_it_asks_before_installing_claude_code_and_uses_the_native_installer():
 
 def test_it_uses_the_official_uv_installer():
     assert "https://astral.sh/uv/install.ps1" in TEXT
+
+
+def _line_of(needle: str) -> int:
+    return next(i for i, x in enumerate(TEXT.splitlines()) if needle in x)
+
+
+def test_it_stops_a_running_tray_before_it_replaces_the_program():
+    stop = _line_of("stop-tray")
+    assert stop < _line_of("uv tool install")
+    line = TEXT.splitlines()[stop]
+    assert "%TOOLBIN%" in line
+    guard = next(x for x in TEXT.splitlines()[:stop][::-1] if x.startswith("if "))
+    assert r'if not exist "%TOOLBIN%\investigate.exe"' in guard  # a first install has no program
+    argv = line.split(".exe", 1)[1].replace('"', "").split()
+    assert cli._parser().parse_args(argv).command == "stop-tray"
+    after = TEXT.splitlines()[stop + 1]
+    assert "errorlevel 1" in after and "goto tray_stays" in after
+    assert "choose quit" in TEXT.lower()
+
+
+def test_the_tool_folder_is_known_before_the_tray_is_stopped():
+    assert _line_of("uv tool dir --bin") < _line_of("stop-tray")
+
+
+def test_it_puts_the_tool_folder_on_the_user_path_after_the_install():
+    assert _line_of("uv tool install") < _line_of("uv tool update-shell") < _line_of("first-run")
+
+
+def test_the_readme_links_the_release_asset_and_keeps_a_raw_fallback():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    repo = PYPROJECT["project"]["urls"]["Repository"]
+    assert f"{repo}/releases/latest/download/install.cmd" in readme
+    assert f"{repo}/raw/main/install.cmd" in readme
+    assert "gh release create" in readme

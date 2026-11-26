@@ -39,19 +39,32 @@ echo https://code.claude.com/docs/en/setup
 
 echo.
 echo [3/4] investigate
+for /f "usebackq delims=" %%i in (`uv tool dir --bin`) do set "TOOLBIN=%%i"
+if not defined TOOLBIN goto fail
+if not exist "%TOOLBIN%\investigate.exe" goto install_tool
+echo Updating. Quitting investigate first if it is running.
+"%TOOLBIN%\investigate.exe" stop-tray
+if errorlevel 1 goto tray_stays
+:install_tool
 uv tool install --force --refresh "investigate[tray,transcribe,instagram] @ https://github.com/KonstantinWaser/investigate/archive/refs/heads/main.zip"
 if errorlevel 1 goto fail
+uv tool update-shell
+if errorlevel 1 echo Could not add %TOOLBIN% to your PATH. investigate still works from its shortcuts.
 
 echo.
 echo [4/4] Start menu shortcuts, start at login and the setup page
-for /f "usebackq delims=" %%i in (`uv tool dir --bin`) do set "TOOLBIN=%%i"
-if not defined TOOLBIN goto fail
 "%TOOLBIN%\investigate.exe" first-run
 if errorlevel 1 goto fail
 
 echo.
 echo Done. The setup page is open in your browser. You can close this window.
 exit /b 0
+
+:tray_stays
+echo.
+echo investigate is still running and cannot be updated while it runs.
+echo Right-click its tray icon, choose Quit, then run this file again.
+goto fail
 
 :fail
 echo.

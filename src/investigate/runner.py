@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -141,6 +142,19 @@ def log_of(argv: list[str], stdout: str, stderr: str) -> str:
     return f"$ {' '.join(argv)}\n\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n"
 
 
+def find_claude(
+    which: Callable[[str], str | None] | None = None, home: Path | None = None
+) -> str | None:
+    """The `claude` program: on PATH, else where the native installer puts it. A tray started at
+    login or in a shell opened before the install may not have that folder on its PATH yet."""
+    found = (which or shutil.which)("claude")
+    if found:
+        return found
+    name = "claude.exe" if sys.platform == "win32" else "claude"
+    candidate = (home or Path.home()) / ".local" / "bin" / name
+    return str(candidate) if candidate.is_file() else None
+
+
 class ClaudeCodeRunner:
     """Claude Code headless: `claude -p` with JSON output. No `--bare` (it ignores login)."""
 
@@ -164,7 +178,7 @@ class ClaudeCodeRunner:
     def _resolve(self) -> list[str] | None:
         if self._command is not None:
             return self._command
-        found = shutil.which("claude")
+        found = find_claude()
         return [found] if found else None
 
     def run(self, request: RunRequest) -> RunnerOutcome:

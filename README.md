@@ -2,7 +2,7 @@
 
 A personal research desk. You paste text, links, files or images (or save an Instagram Collection or a YouTube playlist), an agent CLI researches or fact-checks it in depth, and you get a cited HTML Report that relates the findings to your own projects.
 
-**[Download install.cmd](https://github.com/KonstantinWaser/investigate/raw/main/install.cmd)**, double-click it, and follow the setup page that opens. Windows 10 or 11, no command line, no administrator rights. Details in section 1.
+**[Download install.cmd](https://github.com/KonstantinWaser/investigate/releases/latest/download/install.cmd)**, double-click it, and follow the setup page that opens. Windows 10 or 11, no command line, no administrator rights. Details in section 1.
 
 Runs happen on your machine through the Claude Code CLI. It has no server of its own. Traffic comes from the CLI and the agent (model calls, web search and fetch), the Inbox sources you configure (yt-dlp for YouTube, the browser profile for Instagram), and first-use downloads: the Playwright MCP package through npx and the Whisper model from Hugging Face. MIT licensed. The vocabulary (Item, Run, Report, Depth, Context, Inbox, Verdict) is in `GLOSSARY.md`, the agreed design in `docs/design.md`, what exists elsewhere in `docs/prior-art.md`, and how to add another agent CLI in `docs/runner.md`.
 
@@ -23,7 +23,7 @@ Runs happen on your machine through the Claude Code CLI. It has no server of its
 
 ## 1. Install on Windows (no command line)
 
-1. Click **[Download install.cmd](https://github.com/KonstantinWaser/investigate/raw/main/install.cmd)**. If your browser shows the text instead of saving a file, press Ctrl+S and save it as `install.cmd` (not `install.cmd.txt`).
+1. Click **[Download install.cmd](https://github.com/KonstantinWaser/investigate/releases/latest/download/install.cmd)**. If the link does not start a download, use [the raw file](https://github.com/KonstantinWaser/investigate/raw/main/install.cmd): right-click it, choose Save link as, and make sure the name ends in `.cmd`, not `.txt`.
 2. Double-click the saved file. Windows SmartScreen may say "Windows protected your PC" because the file is not signed: click **More info**, then **Run anyway**. The file is short and readable, open it in Notepad first if you like.
 3. Wait a few minutes. The window shows each step in plain words:
    1. It installs [uv](https://docs.astral.sh/uv/) if it is missing (the official installer).
@@ -34,7 +34,7 @@ Runs happen on your machine through the Claude Code CLI. It has no server of its
 
 Everything is installed for your Windows user, in your user profile, with no administrator rights. The installer does not install Git, Chrome or ffmpeg; the setup page links or installs what you choose. If a step fails, the window stays open with the message; running `install.cmd` again is safe.
 
-**Update:** run `install.cmd` again. It reinstalls the newest version, leaves your data folder and `config.toml` alone, and does not start a second tray.
+**Update:** run `install.cmd` again. It quits a running tray first (if that fails it tells you to use the tray icon's Quit), reinstalls the newest version, starts the new tray, leaves your data folder and `config.toml` alone, and does not start a second tray.
 
 **Uninstall:** Start menu, **Uninstall investigate**. It quits the tray, removes the shortcuts and start at login, removes the program, and keeps your data folder (Reports, Context files, browser login) unless you answer yes to the second question. uv and Claude Code stay installed.
 
@@ -211,6 +211,10 @@ uv sync --extra tray --extra transcribe --extra instagram
 ```
 
 Each extra is optional: `tray` (icon, quick capture, toasts, hotkey), `transcribe` (faster-whisper, local speech to text), `instagram` (Playwright, for the Instagram Inbox). Plain `uv sync` is enough for the command line. As a tool without a clone: `uv tool install "investigate[tray] @ https://github.com/KonstantinWaser/investigate/archive/refs/heads/main.zip"`, then `investigate first-run`. The commands in this README are written `uv run investigate ...` for a clone.
+
+### Publishing install.cmd
+
+The download link points at the latest release's `install.cmd` asset, which GitHub serves as a download (the raw file is shown as text). A maintainer publishes it with `gh release create <tag> install.cmd`, and again for a changed script (`gh release upload <tag> install.cmd --clobber`). The script installs the `main` branch, so a release is only needed when `install.cmd` itself changes.
 
 ### Tests
 

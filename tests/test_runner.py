@@ -121,3 +121,28 @@ def test_allowlist_reads_attachments_of_the_run_folder(tmp_path):
     cmd = build_command(["claude"], _request(tmp_path, permission_mode=PermissionMode.ALLOWLIST))
     allowed = cmd[cmd.index("--allowedTools") + 1 :]
     assert f"Read({_rule_path(tmp_path)}/attachments/**)" in allowed
+
+
+def test_find_claude_falls_back_to_the_native_installer_folder(tmp_path):
+    import sys
+
+    from investigate.runner import find_claude
+
+    name = "claude.exe" if sys.platform == "win32" else "claude"
+    assert find_claude(lambda _: None, home=tmp_path) is None
+    exe = tmp_path / ".local" / "bin" / name
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"")
+    assert find_claude(lambda _: None, home=tmp_path) == str(exe)
+    assert find_claude(lambda _: "C:/on/path/claude", home=tmp_path) == "C:/on/path/claude"
+
+
+def test_runner_uses_the_native_installer_folder_when_path_misses(tmp_path, monkeypatch):
+    name = "claude.exe" if sys.platform == "win32" else "claude"
+    exe = tmp_path / ".local" / "bin" / name
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"")
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("investigate.runner.shutil.which", lambda _: None)
+    assert ClaudeCodeRunner()._resolve() == [str(exe)]
