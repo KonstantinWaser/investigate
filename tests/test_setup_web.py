@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import os
 import re
 import tomllib
 from base64 import b64encode
@@ -41,10 +42,20 @@ from tests.test_setup import FakeIO
 FORM = {"Content-Type": "application/x-www-form-urlencoded"}
 
 
+class FakeProc:
+    def __init__(self) -> None:
+        self.alive = True
+
+    def poll(self) -> int | None:
+        return None if self.alive else 0
+
+
 class FakeActions:
     def __init__(self, io: FakeIO | None = None, *, login_running: bool = False) -> None:
         self.io = io or FakeIO(tools={"ffmpeg", "winget"})
         self.windows: list[list[str]] = []
+        self.procs: list[FakeProc] = []
+        self.start_error: OSError | None = None
         self.logins: list[Path] = []
         self.login_running = login_running
 
@@ -53,11 +64,19 @@ class FakeActions:
             self.logins.append(home)
             return not self.login_running
 
+        def open_window(argv: list[str]) -> FakeProc:
+            if self.start_error is not None:
+                raise self.start_error
+            self.windows.append(argv)
+            proc = FakeProc()
+            self.procs.append(proc)
+            return proc
+
         return SetupActions(
             io=self.io.build(),
-            open_window=self.windows.append,
+            open_window=open_window,
             start_browser_login=start_login,
-            browser_login_running=lambda: self.login_running,
+            browser_login_running=lambda home: self.login_running,
         )
 
 
@@ -134,7 +153,7 @@ def test_browser_login_needs_chrome_and_runs_once_at_a_time(home):
     with pytest.raises(SetupError, match="Chrome"):
         start_browser_login(home, actions)
     _, actions = _actions(login_running=True)
-    with pytest.raises(SetupError, match="already open"):
+    with pytest.raises(SetupError, match="profile is in use"):
         start_browser_login(home, actions)
     fake, actions = _actions()
     start_browser_login(home, actions)
@@ -454,11 +473,11 @@ def test_background_login_never_blocks_and_allows_one_at_a_time(home, monkeypatc
 
     monkeypatch.setattr(setupweb.browser, "login", slow_login)
     assert setupweb.background_login(home) is True  # returned while the login is still open
-    assert started.wait(5) and setupweb.login_running()
+    assert started.wait(5) and setupweb.login_running(home)
     assert setupweb.background_login(home) is False
     release.set()
     setupweb._login_thread.join(5)
-    assert not setupweb.login_running()
+    assert not setupweb.login_running(home)
 
 
 def test_tray_setup_item_opens_the_setup_page(home):
@@ -472,3 +491,163 @@ def test_tray_setup_item_opens_the_setup_page(home):
         assert opened == [app.server.url + "setup"]
     finally:
         app.shutdown()
+
+
+# review round: finding 1, a login that cannot start is not reported as started
+
+
+def test_background_login_refuses_while_the_profile_lock_is_held(home):
+    from investigate.profile_lock import profile_lock
+
+    assert setupweb.login_running(home) is False
+    with profile_lock(home):  # a Run, or the tray's own login window
+        assert setupweb.login_running(home) is True
+        assert setupweb.background_login(home) is False
+    assert setupweb.login_running(home) is False
+
+
+def test_page_does_not_offer_the_login_button_while_one_is_open(client, fake):
+    fake.login_running = True
+    page = client.get("/setup")[2].decode()
+    assert "/setup/browser-login" not in page
+    status, _, body = client.post("/setup/browser-login", b"", FORM)
+    assert status == 422 and b"profile is in use" in body
+    assert b"Chrome opened" not in body
+
+
+# finding 2: a program is not started again while its window is still open
+
+
+def test_claude_login_and_ffmpeg_are_not_started_twice_while_running(client, fake):
+    fake.io.tools = {"winget"}
+    for action in ("claude-login", "ffmpeg"):
+        assert client.post(f"/setup/{action}", b"", FORM)[0] == 303
+        status, _, body = client.post(f"/setup/{action}", b"", FORM)
+        assert status == 422 and b"already running" in body
+    assert len(fake.windows) == 2
+    for proc in fake.procs:
+        proc.alive = False
+    assert client.post("/setup/claude-login", b"", FORM)[0] == 303
+    assert len(fake.windows) == 3
+
+
+# finding 3: names that differ only in case are one Context on Windows
+
+
+@pytest.mark.skipif(os.name != "nt", reason="case-insensitive file names")
+def test_replacing_with_a_name_that_differs_in_case_keeps_one_entry(home):
+    load_config(home)
+    add_contexts(home, [("work.md", b"one")], replace=False)
+    out = add_contexts(home, [("Work.md", b"two")], replace=True)
+    assert [o.status for o in out] == ["replaced"]
+    assert len(load_config(home).contexts) == 1
+
+
+def test_context_names_compare_through_normcase(home, monkeypatch):
+    load_config(home)
+    add_contexts(home, [("a.md", b"one")], replace=False)
+    seen = []
+    real = os.path.normcase
+    monkeypatch.setattr(setupweb.os.path, "normcase", lambda p: seen.append(p) or real(p))
+    add_contexts(home, [("a.md", b"two")], replace=True)
+    assert seen  # names and paths are compared after normcase
+
+
+# finding 4: the upload goes through the locked path and tells the tray
+
+
+def test_context_upload_tells_the_tray_and_holds_the_settings_lock(
+    client, server, changed, monkeypatch
+):
+    held = []
+    real = setupweb.add_contexts
+
+    def spy(*args, **kwargs):
+        held.append(server._settings_lock.locked())
+        return real(*args, **kwargs)
+
+    import investigate.server as srv_module
+
+    monkeypatch.setattr(srv_module, "add_contexts", spy)
+    body, headers = _multipart({}, [("files", "n.md", b"v1")])
+    assert client.post("/setup/contexts", body, headers)[0] == 200
+    assert held == [True]
+    assert changed and changed[-1].contexts
+
+
+# finding 5: a program that cannot be started is an error on the page
+
+
+def test_oserror_from_starting_a_program_is_shown_not_raised(client, fake):
+    fake.start_error = FileNotFoundError("claude.exe is gone")
+    status, _, body = client.post("/setup/claude-login", b"", FORM)
+    assert status == 422 and b"claude.exe is gone" in body
+
+
+# finding 6: the login status is cached and checked by one caller at a time
+
+
+def _counting(fake):
+    calls = []
+    inner = fake.io.build().run
+
+    def run(argv):
+        calls.append(argv)
+        return inner(argv)
+
+    return calls, run
+
+
+def test_agent_status_is_cached_for_a_short_time_and_refreshed_on_demand(home):
+    from dataclasses import replace
+
+    from investigate.setupweb import AgentStatusCache
+
+    fake = FakeActions()
+    calls, run = _counting(fake)
+    now = [100.0]
+    base = fake.build()
+    actions = replace(
+        base,
+        io=replace(base.io, run=run),
+        agent_cache=AgentStatusCache(ttl=30, clock=lambda: now[0]),
+    )
+    gather_status(home, actions)
+    gather_status(home, actions)
+    assert len(calls) == 1
+    gather_status(home, actions, refresh=True)
+    assert len(calls) == 2
+    now[0] += 31
+    gather_status(home, actions)
+    assert len(calls) == 3
+
+
+def test_concurrent_status_requests_run_one_check(home):
+    import threading
+    import time
+    from dataclasses import replace
+
+    fake = FakeActions()
+    calls = []
+
+    def slow(argv):
+        calls.append(argv)
+        time.sleep(0.2)
+        return 0, '{"loggedIn": true}'
+
+    base = fake.build()
+    actions = replace(base, io=replace(base.io, run=slow))
+    threads = [threading.Thread(target=gather_status, args=(home, actions)) for _ in range(5)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(10)
+    assert len(calls) == 1
+
+
+def test_a_claude_login_action_bypasses_the_cache(client, fake):
+    fake.io.status = (0, '{"loggedIn": false}')
+    assert b"Not logged in" in client.get("/setup")[2]
+    fake.io.status = (0, '{"loggedIn": true}')
+    assert b"Not logged in" in client.get("/setup")[2]  # cached
+    assert b"Logged in" in client.get("/setup?did=claude-login&t=1")[2]

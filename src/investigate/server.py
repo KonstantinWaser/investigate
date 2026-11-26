@@ -27,6 +27,7 @@ from email.parser import BytesParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from investigate import history
@@ -338,17 +339,18 @@ class HistoryServer:
                     pass
             return result
 
-    def edit_setup_config(self, edit: Callable[[], Config]) -> Config:
+    def edit_setup_config(self, edit: Callable[[], Any]) -> Any:
         """Run a setup page's config write under the Settings lock, then tell the tray (hotkey,
         start at login) like a Settings save does."""
         with self._settings_lock:
-            config = edit()
+            result = edit()
             if self.on_config_changed is not None:
                 try:
+                    config = result if isinstance(result, Config) else load_config(self.home)
                     self.on_config_changed(config)
                 except Exception:  # a broken listener must not turn a saved file into an error
                     pass
-            return config
+            return result
 
     def active_ids(self) -> set[str]:
         with self._lock:
@@ -856,13 +858,19 @@ class _Handler(BaseHTTPRequestHandler):
             {"Content-Security-Policy": setup_csp()},
         )
 
+    def _setup_error(self, message: str) -> None:
+        self._setup_html(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            setup_page(gather_status(self.app.home, self.app.setup), error=message),
+        )
+
     def _setup_get(self, query: dict) -> None:
         did = (query.get("did") or [""])[0]
         tick = (query.get("t") or ["0"])[0]
         self._setup_html(
             HTTPStatus.OK,
             setup_page(
-                gather_status(self.app.home, self.app.setup),
+                gather_status(self.app.home, self.app.setup, refresh=did == "claude-login"),
                 did=did,
                 tick=int(tick) if tick.isdigit() and len(tick) < 6 else 0,
             ),
@@ -873,7 +881,8 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if action == "contexts":
                 fields, files = parse_multipart(self.headers.get("Content-Type", ""), body)
-                outcomes = add_contexts(home, files, replace="replace" in fields)
+                replace = "replace" in fields
+                outcomes = self.app.edit_setup_config(lambda: add_contexts(home, files, replace))
                 self._setup_html(
                     HTTPStatus.OK,
                     setup_page(gather_status(home, actions), outcomes=outcomes),
@@ -899,10 +908,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._text(HTTPStatus.NOT_FOUND, "not found")
                 return
         except (SetupError, SubmitError) as exc:
-            self._setup_html(
-                HTTPStatus.UNPROCESSABLE_ENTITY,
-                setup_page(gather_status(home, actions), error=str(exc)),
-            )
+            self._setup_error(str(exc))
+            return
+        except OSError as exc:
+            self._setup_error(f"Could not do that: {exc}")
             return
         self._redirect(f"/setup?did={action}")
 

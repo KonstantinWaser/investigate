@@ -18,6 +18,7 @@ setup page in `setupweb.py`.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import shutil
@@ -49,20 +50,30 @@ for it. Keep one file per area, and keep anything private to one area out of the
 
 
 def _run(argv: list[str]) -> tuple[int, str]:
-    from investigate.runner import console_flags
+    """Run a status command and return (exit code, stdout). Stdin is closed. On a timeout the
+    whole process tree is killed (the npm `claude.cmd` shim starts a child that would keep the
+    pipes open) and the timeout is raised; nothing waits on the pipes without a limit."""
+    from investigate import runner
 
-    done = subprocess.run(  # noqa: S603
+    proc = subprocess.Popen(  # noqa: S603
         argv,
-        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         text=True,
         encoding="utf-8",
         errors="replace",
-        stdin=subprocess.DEVNULL,
-        timeout=STATUS_TIMEOUT_SECONDS,
-        check=False,
-        **console_flags(),
+        start_new_session=sys.platform != "win32",
+        **runner.console_flags(),
     )
-    return done.returncode, done.stdout
+    try:
+        out, _ = proc.communicate(timeout=STATUS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        runner._kill_tree(proc)
+        with contextlib.suppress(subprocess.TimeoutExpired, OSError, ValueError):
+            proc.communicate(timeout=2)
+        raise
+    return proc.returncode, out or ""
 
 
 def _has_module(name: str) -> bool:

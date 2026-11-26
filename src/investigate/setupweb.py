@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,7 @@ from investigate.attachments import sanitise_name
 from investigate.config import Config, ConfigError, ContextFile, config_path, load_config
 from investigate.history import _replace
 from investigate.inbox import parse_inbox_config
+from investigate.profile_lock import ProfileBusy, profile_lock
 from investigate.settings import read_raw
 from investigate.setup import (
     AgentStatus,
@@ -50,26 +52,39 @@ class SetupError(ValueError):
     """A step cannot be done; the message tells the user why."""
 
 
-def open_in_window(argv: list[str]) -> None:
-    """Start a program in a console window of its own and return at once."""
+def open_in_window(argv: list[str]) -> subprocess.Popen:
+    """Start a program in a console window of its own and return it at once."""
     if sys.platform == "win32":
-        subprocess.Popen(argv, creationflags=subprocess.CREATE_NEW_CONSOLE)  # noqa: S603
-    else:
-        subprocess.Popen(  # noqa: S603
-            argv, stdin=subprocess.DEVNULL, start_new_session=True, close_fds=True
-        )
+        return subprocess.Popen(argv, creationflags=subprocess.CREATE_NEW_CONSOLE)  # noqa: S603
+    return subprocess.Popen(  # noqa: S603
+        argv, stdin=subprocess.DEVNULL, start_new_session=True, close_fds=True
+    )
 
 
 _login_lock = threading.Lock()
 _login_thread: threading.Thread | None = None
 
 
+def _profile_busy(home: Path) -> bool:
+    """True while anything holds the browser profile: a Run, the tray's login window, a login
+    from another process."""
+    try:
+        with profile_lock(home):
+            return False
+    except ProfileBusy:
+        return True
+    except OSError:
+        return False
+
+
 def background_login(home: Path) -> bool:
-    """Run `browser.login` on a thread (it blocks until Chrome is closed). False when a login
-    window of this process is still open."""
+    """Run `browser.login` on a thread (it blocks until Chrome is closed). False when the profile
+    is in use, so the caller never reports a login that cannot open."""
     global _login_thread
     with _login_lock:
         if _login_thread is not None and _login_thread.is_alive():
+            return False
+        if _profile_busy(home) or browser.profile_in_use(browser.profile_dir(home)):
             return False
 
         def work() -> None:
@@ -81,17 +96,50 @@ def background_login(home: Path) -> bool:
         return True
 
 
-def login_running() -> bool:
+def login_running(home: Path) -> bool:
+    """A login window is open: one started here, or any holder of the profile lock (the tray's
+    own login, a Run)."""
     with _login_lock:
-        return _login_thread is not None and _login_thread.is_alive()
+        if _login_thread is not None and _login_thread.is_alive():
+            return True
+    return _profile_busy(home)
+
+
+AGENT_STATUS_TTL_SECONDS = 30.0
+
+
+class AgentStatusCache:
+    """`claude auth status` result kept for a short time, with one check in flight at a time:
+    concurrent page loads wait for the running check and share its answer."""
+
+    def __init__(
+        self, ttl: float = AGENT_STATUS_TTL_SECONDS, clock: Callable[[], float] = time.monotonic
+    ) -> None:
+        self._ttl, self._clock = ttl, clock
+        self._lock = threading.Lock()
+        self._value: AgentStatus | None = None
+        self._at = 0.0
+
+    def get(self, io: SetupIO, *, refresh: bool = False) -> AgentStatus:
+        seen = self._at
+        with self._lock:
+            fresh = self._value is not None and self._clock() - self._at < self._ttl
+            if fresh and not (refresh and self._at == seen):
+                return self._value  # type: ignore[return-value]
+            self._value = agent_status(io)
+            self._at = self._clock()
+            return self._value
 
 
 @dataclass(frozen=True)
 class SetupActions:
     io: SetupIO = field(default_factory=SetupIO)
-    open_window: Callable[[list[str]], None] = open_in_window
+    # Starts a program in its own window; may return the process, so it is not started twice.
+    open_window: Callable[[list[str]], Any] = open_in_window
     start_browser_login: Callable[[Path], bool] = background_login
-    browser_login_running: Callable[[], bool] = login_running
+    browser_login_running: Callable[[Path], bool] = login_running
+    agent_cache: AgentStatusCache = field(default_factory=AgentStatusCache)
+    started: dict[str, Any] = field(default_factory=dict)  # action name -> its process
 
 
 @dataclass
@@ -112,13 +160,13 @@ class SetupStatus:
     problem: str = ""  # the config file cannot be read
 
 
-def gather_status(home: Path, actions: SetupActions) -> SetupStatus:
+def gather_status(home: Path, actions: SetupActions, *, refresh: bool = False) -> SetupStatus:
     io = actions.io
     status = SetupStatus(
-        agent=agent_status(io),
+        agent=actions.agent_cache.get(io, refresh=refresh),
         chrome=io.chrome_found(),
         browser_logged_in=browser.is_logged_in(home),
-        browser_login_running=actions.browser_login_running(),
+        browser_login_running=actions.browser_login_running(home),
         ffmpeg=io.which("ffmpeg") is not None,
         winget=io.which("winget") is not None,
         whisper=io.has_module("faster_whisper"),
@@ -145,11 +193,21 @@ def gather_status(home: Path, actions: SetupActions) -> SetupStatus:
 # programs
 
 
+def _start_once(actions: SetupActions, action: str, argv: list[str]) -> None:
+    """Open the program's window unless the one opened for this action is still running."""
+    previous = actions.started.get(action)
+    if previous is not None and previous.poll() is None:
+        raise SetupError("That is already running in its own window. Finish it there first.")
+    proc = actions.open_window(argv)
+    if proc is not None:
+        actions.started[action] = proc
+
+
 def start_claude_login(actions: SetupActions) -> None:
     found = actions.io.which("claude")
     if found is None:
         raise SetupError("Claude Code is not installed. Use the install link first.")
-    actions.open_window([found, "auth", "login"])
+    _start_once(actions, "claude-login", [found, "auth", "login"])
 
 
 def start_ffmpeg_install(actions: SetupActions) -> None:
@@ -158,14 +216,15 @@ def start_ffmpeg_install(actions: SetupActions) -> None:
     winget = actions.io.which("winget")
     if winget is None:
         raise SetupError("winget was not found on this PC. Use the download link instead.")
-    actions.open_window([winget, *ffmpeg_install_command()[1:]])
+    _start_once(actions, "ffmpeg", [winget, *ffmpeg_install_command()[1:]])
 
 
 def start_browser_login(home: Path, actions: SetupActions) -> None:
     if not actions.io.chrome_found():
         raise SetupError("Google Chrome was not found. Install it with the download link first.")
-    if not actions.start_browser_login(home):
-        raise SetupError("The login window is already open. Close it when you are done.")
+    in_use = SetupError("The browser profile is in use (a Run or another login window).")
+    if actions.browser_login_running(home) or not actions.start_browser_login(home):
+        raise in_use
 
 
 # Context files
@@ -219,8 +278,10 @@ def _add_one(
         return UploadOutcome(name, "rejected", "Not added: the name is not allowed.")
     resolved = str(target.resolve())
     context_name = target.stem
-    listed = {c.name: c.path for c in config.contexts}
-    if listed.get(context_name, resolved) != resolved:
+    # Windows file names ignore case, so "Work.md" is the entry "work" already has.
+    listed = {os.path.normcase(c.name): os.path.normcase(c.path) for c in config.contexts}
+    key = os.path.normcase(context_name)
+    if listed.get(key, os.path.normcase(resolved)) != os.path.normcase(resolved):
         return UploadOutcome(
             name,
             "rejected",
@@ -239,7 +300,7 @@ def _add_one(
         _write_bytes_atomically(target, data)
     except OSError as exc:
         return UploadOutcome(name, "rejected", f"Not added: {exc}")
-    if context_name not in listed:
+    if key not in listed:
         try:
             _add_context(home, context_name, Path(resolved))
         except (ConfigError, OSError) as exc:

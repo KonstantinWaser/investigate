@@ -292,21 +292,59 @@ def test_context_file_with_a_blank_name_is_reported_not_raised(home, tmp_path):
 # the login check can never start a model session
 
 
+class _FakeProc:
+    """A stand-in for Popen: records how it was started and can hang on the first read."""
+
+    instances: list = []
+
+    def __init__(self, argv, **kwargs):
+        self.argv, self.kwargs, self.pid, self.returncode = argv, kwargs, 4242, 0
+        self.hang, self.communicates = _FakeProc.hang, []
+        _FakeProc.instances.append(self)
+
+    hang = False
+
+    def communicate(self, timeout=None):
+        import subprocess
+
+        self.communicates.append(timeout)
+        if self.hang and len(self.communicates) == 1:
+            raise subprocess.TimeoutExpired(self.argv, timeout)
+        return LOGGED_IN, None
+
+    def kill(self):
+        pass
+
+
 def test_status_check_closes_stdin_and_has_a_timeout(monkeypatch):
     import subprocess
 
     from investigate import setup
 
-    seen = {}
-
-    def fake_run(argv, **kwargs):
-        seen.update(kwargs, argv=argv)
-        return subprocess.CompletedProcess(argv, 0, stdout=LOGGED_IN, stderr="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    _FakeProc.instances, _FakeProc.hang = [], False
+    monkeypatch.setattr(subprocess, "Popen", _FakeProc)
     assert setup._run(["claude", "auth", "status"]) == (0, LOGGED_IN)
-    assert seen["stdin"] is subprocess.DEVNULL
-    assert seen["timeout"] == setup.STATUS_TIMEOUT_SECONDS
+    proc = _FakeProc.instances[0]
+    assert proc.kwargs["stdin"] is subprocess.DEVNULL
+    assert proc.communicates == [setup.STATUS_TIMEOUT_SECONDS]
+
+
+def test_status_that_hangs_is_killed_with_its_children_and_never_waited_on_again(monkeypatch):
+    import subprocess
+
+    import pytest
+
+    from investigate import runner, setup
+
+    _FakeProc.instances, _FakeProc.hang = [], True
+    killed = []
+    monkeypatch.setattr(subprocess, "Popen", _FakeProc)
+    monkeypatch.setattr(runner, "_kill_tree", killed.append)
+    with pytest.raises(subprocess.TimeoutExpired):
+        setup._run(["claude", "auth", "status"])
+    proc = _FakeProc.instances[0]
+    assert killed == [proc]  # the whole tree, so a claude.cmd shim cannot keep the pipes open
+    assert all(t is not None for t in proc.communicates)  # no second unbounded wait
 
 
 def test_status_that_times_out_or_is_not_json_is_unverified():
