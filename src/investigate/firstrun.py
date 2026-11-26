@@ -32,10 +32,12 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from investigate.autostart import Autostart, default_autostart, entry_suffix, startup_command
+from investigate.browser import MARKER_NAME
 from investigate.config import ConfigError, config_path, load_config
 from investigate.instance import holds_lock, running_url
 from investigate.runner import console_flags
 from investigate.setup import edit_config
+from investigate.setupweb import CONTEXTS_DIR
 
 SHORTCUT_NAME = "investigate"
 UNINSTALL_NAME = "Uninstall investigate"
@@ -47,7 +49,8 @@ _CREATE_NO_WINDOW = 0x08000000
 # A folder is deleted only when it has one of the first two and nothing outside this set. The
 # names are what the code writes into the data folder: config and its temp file, the History
 # index with its lock, temp and broken-copy files, the Run folders, the browser profile, the
-# inbox folder and lock, and the tray, profile and index locks.
+# inbox folder and lock, the tray, profile and index locks, the Context files the setup page
+# uploads and the browser login marker.
 _DATA_MARKERS = ("config.toml", "index.json")
 _DATA_NAMES = frozenset(
     {
@@ -62,6 +65,8 @@ _DATA_NAMES = frozenset(
         "profile.lock",
         "tray.lock",
         "tray.json",
+        CONTEXTS_DIR,
+        MARKER_NAME,
     }
 )
 _DATA_PREFIXES = ("index.json.",)  # `.tmp` and `.broken-<id>` copies of the index
@@ -150,12 +155,16 @@ def default_start_menu() -> Path:
     return Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
 
 
-def console_command(home: Path | None = None, executable: str | None = None) -> list[str]:
-    """How to start `investigate` in a console: the `investigate` script next to the interpreter
-    (a uv tool or venv install has one), else the interpreter with `-m investigate.cli`."""
+def console_command(
+    home: Path | None = None, executable: str | None = None, args: tuple[str, ...] = ()
+) -> list[str]:
+    """How to start `investigate <args>` in a console: the `investigate` script next to the
+    interpreter (a uv tool or venv install has one), else the interpreter with
+    `-m investigate.cli`. `--home` is a subcommand option, so it goes after `args`."""
     exe = Path(executable or sys.executable)
     script = exe.with_name("investigate.exe" if sys.platform == "win32" else "investigate")
     command = [str(script)] if script.is_file() else [str(exe), "-m", "investigate.cli"]
+    command += args
     if home is not None and entry_suffix(home):
         command += ["--home", str(Path(home).expanduser().resolve())]
     return command
@@ -274,11 +283,9 @@ class InstallIO:
     start_menu: Path = field(default_factory=default_start_menu)
     autostart: Autostart | None = None
     tray_command: Callable[[Path], list[str]] = lambda home: startup_command(home=home)  # noqa: E731
-    uninstall_command: Callable[[Path], list[str]] = lambda home: [  # noqa: E731
-        *console_command(home),
-        "uninstall",
-        "--pause",
-    ]
+    uninstall_command: Callable[[Path], list[str]] = lambda home: console_command(  # noqa: E731
+        home, args=("uninstall", "--pause")
+    )
     tray_running: Callable[[Path], bool] = holds_lock
     running_url: Callable[[Path], str | None] = running_url
     start_detached: Callable[[list[str]], None] = start_detached

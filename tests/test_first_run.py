@@ -436,10 +436,42 @@ def test_uninstall_waits_long_enough_for_a_run_to_stop():
 
 
 def test_the_uninstall_shortcut_keeps_its_console_open_and_pause_waits_for_enter(tmp_path, home):
-    assert InstallIO().uninstall_command(home)[-2:] == ["uninstall", "--pause"]
+    command = InstallIO().uninstall_command(home)
+    assert "uninstall" in command and "--pause" in command
     world = World(tmp_path, answers=["n", ""])
     run_uninstall(home, world.build(), pause=True)
     assert world.asked[-1].startswith("Press Enter to close")
     world = World(tmp_path, answers=["n"])
     run_uninstall(home, world.build())
     assert not any(a.startswith("Press Enter") for a in world.asked)
+
+
+def test_the_default_uninstall_shortcut_parses_for_a_non_default_home(tmp_path):
+    from investigate.cli import _parser
+    from investigate.firstrun import InstallIO
+
+    other = tmp_path / "elsewhere"
+    command = InstallIO().uninstall_command(other)
+    args = (
+        command[command.index("investigate.cli") + 1 :]
+        if "investigate.cli" in command
+        else command[1:]
+    )
+    parsed = _parser().parse_args(args)
+    assert parsed.command == "uninstall" and parsed.pause
+    assert Path(parsed.home).resolve() == other.resolve()
+
+
+def test_uninstall_deletes_a_folder_the_setup_page_and_login_wrote_to(tmp_path, monkeypatch):
+    from investigate.browser import mark_logged_in
+    from investigate.setupweb import add_contexts
+
+    gone = _deletions(monkeypatch)
+    folder = tmp_path / "data3"
+    folder.mkdir()
+    (folder / "index.json").write_text("[]")
+    add_contexts(folder, [("work.md", b"my work")], False)
+    mark_logged_in(folder)
+    world = World(tmp_path)
+    _answer_yes_to_all(world, folder)
+    assert gone == [folder]
