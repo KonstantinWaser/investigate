@@ -41,11 +41,31 @@ SHORTCUT_NAME = "investigate"
 UNINSTALL_NAME = "Uninstall investigate"
 TOOL_NAME = "investigate"
 WAIT_FOR_TRAY_SECONDS = 20.0
-WAIT_FOR_QUIT_SECONDS = 30.0
+WAIT_FOR_QUIT_SECONDS = 90.0  # a Run in progress gets about 55 s before the tray gives up on it
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _CREATE_NO_WINDOW = 0x08000000
-# What marks a folder as an investigate data folder, so uninstall never deletes some other one.
-_DATA_MARKERS = ("config.toml", "index.json", "runs", "browser-profile")
+# A folder is deleted only when it has one of the first two and nothing outside this set. The
+# names are what the code writes into the data folder: config and its temp file, the History
+# index with its lock, temp and broken-copy files, the Run folders, the browser profile, the
+# inbox folder and lock, and the tray, profile and index locks.
+_DATA_MARKERS = ("config.toml", "index.json")
+_DATA_NAMES = frozenset(
+    {
+        "config.toml",
+        "config.toml.tmp",
+        "index.json",
+        "index.lock",
+        "runs",
+        "browser-profile",
+        "inbox",
+        "inbox.lock",
+        "profile.lock",
+        "tray.lock",
+        "tray.json",
+    }
+)
+_DATA_PREFIXES = ("index.json.",)  # `.tmp` and `.broken-<id>` copies of the index
+_UTF8 = "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
 
 
 class Shortcuts:
@@ -64,7 +84,7 @@ class Shortcuts:
 
 
 _READ_SCRIPT = (
-    "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:INV_LNK);"
+    _UTF8 + "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:INV_LNK);"
     "[Console]::Out.Write($s.TargetPath+[char]10+$s.Arguments)"
 )
 _CREATE_SCRIPT = (
@@ -257,6 +277,7 @@ class InstallIO:
     uninstall_command: Callable[[Path], list[str]] = lambda home: [  # noqa: E731
         *console_command(home),
         "uninstall",
+        "--pause",
     ]
     tray_running: Callable[[Path], bool] = holds_lock
     running_url: Callable[[Path], str | None] = running_url
@@ -372,15 +393,35 @@ def run_first_run(home: Path, io: InstallIO | None = None) -> int:
     return 0 if ok else 1
 
 
-def _is_data_folder(home: Path) -> bool:
-    return any((home / marker).exists() for marker in _DATA_MARKERS)
+def _refusal(home: Path) -> str | None:
+    """Why this folder must not be deleted as a data folder, or None when it may be."""
+    try:
+        resolved = home.resolve()
+        user = Path.home().resolve()
+    except OSError as exc:
+        return f"it cannot be resolved ({exc})"
+    if resolved == Path(resolved.anchor) or resolved.parent == resolved:
+        return "it is a drive root"
+    if resolved == user or resolved in user.parents:
+        return "it is your user folder or contains it"
+    if not any((resolved / marker).is_file() for marker in _DATA_MARKERS):
+        return "it has no config.toml or index.json"
+    try:
+        names = [entry.name for entry in resolved.iterdir()]
+    except OSError as exc:
+        return f"it cannot be read ({exc})"
+    stray = [n for n in names if n not in _DATA_NAMES and not n.startswith(_DATA_PREFIXES)]
+    if stray:
+        return f"it holds files this app does not create ({', '.join(sorted(stray)[:3])})"
+    return None
 
 
 def _delete_data_folder(io: InstallIO, home: Path) -> None:
     if not home.exists():
         return
-    if not _is_data_folder(home):
-        io.say(f"{home} does not look like an investigate data folder, so it is kept.")
+    reason = _refusal(home)
+    if reason is not None:
+        io.say(f"Will not delete {home}: {reason}. It is kept.")
         return
     question = f"Also delete the data folder {home} (your Reports, config and browser login)?"
     if not _confirm(io, question):
@@ -392,22 +433,40 @@ def _delete_data_folder(io: InstallIO, home: Path) -> None:
         func(path)
 
     try:
-        shutil.rmtree(home, onexc=retry)
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(home, onexc=retry)
+        else:  # `onexc` is new in 3.12; `onerror` passes exc_info instead of the exception
+            shutil.rmtree(home, onerror=lambda func, path, info: retry(func, path, info[1]))
     except OSError as exc:
         io.say(f"error: could not delete {home}: {exc}")
     else:
         io.say(f"Deleted {home}")
 
 
-def run_uninstall(home: Path, io: InstallIO | None = None, *, assume_yes: bool = False) -> int:
-    """0 when done, 1 when stopped before removing anything or when a step failed."""
+def run_uninstall(
+    home: Path, io: InstallIO | None = None, *, assume_yes: bool = False, pause: bool = False
+) -> int:
+    """0 when done, 1 when stopped before removing anything or when a step failed. `pause` waits
+    for Enter at the end, for the console the Start menu shortcut opens."""
     io = io or InstallIO()
+    code = _uninstall(home, io, assume_yes)
+    if pause:
+        try:
+            io.ask("Press Enter to close ")
+        except EOFError:
+            pass
+    return code
+
+
+def _uninstall(home: Path, io: InstallIO, assume_yes: bool) -> int:
     if io.platform != "win32":
         io.say("uninstall is for Windows installs. Use your package manager's own uninstall.")
         return 2
     if not assume_yes and not _confirm(io, "Remove investigate from this computer?"):
         io.say("Nothing was changed.")
         return 1
+    if io.tray_running(home):
+        io.say("Quitting the tray (waiting for running Runs to stop, up to 90 seconds)...")
     if not io.stop_tray(home):
         io.say("The tray did not quit. Quit it from its menu (or Task Manager) and run this again.")
         return 1

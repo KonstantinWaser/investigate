@@ -62,6 +62,9 @@ def _parser() -> argparse.ArgumentParser:
         "uninstall", help="Remove the shortcuts, start at login and the program. Keeps your data."
     )
     uninstall.add_argument("--yes", action="store_true", help="Skip the first question.")
+    uninstall.add_argument(
+        "--pause", action="store_true", help="Wait for Enter at the end (the shortcut uses it)."
+    )
     for command in (first, uninstall):
         command.add_argument("--home", type=Path, help="Data folder (default: the usual one).")
     sub.add_parser("login", help="Open the browser profile to log in to YouTube, Instagram, X.")
@@ -191,7 +194,7 @@ def main(
             home = args.home.expanduser().resolve()
         if args.command == "first-run":
             return run_first_run(home)
-        return run_uninstall(home, assume_yes=args.yes)
+        return run_uninstall(home, assume_yes=args.yes, pause=args.pause and sys.stdin.isatty())
     if args.command == "login":
         return browser.login(home)
     if args.command == "tray":

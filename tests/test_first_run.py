@@ -275,7 +275,7 @@ def test_uninstall_never_deletes_a_folder_that_is_not_a_data_folder(tmp_path):
     world = World(tmp_path, answers=["y", "y"])
     run_uninstall(stray, world.build())
     assert (stray / "thesis.txt").is_file()
-    assert "not look like" in world.output
+    assert "will not delete" in world.output.lower()
 
 
 def test_uninstall_stops_when_the_tray_will_not_quit(tmp_path, home):
@@ -334,3 +334,112 @@ def test_the_gui_script_is_declared():
     root = Path(__file__).resolve().parent.parent
     data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     assert data["project"]["gui-scripts"]["investigate-tray"] == "investigate.cli:tray_main"
+
+
+# review fixes
+
+
+def _deletions(monkeypatch) -> list[Path]:
+    gone: list[Path] = []
+    monkeypatch.setattr("investigate.firstrun.shutil.rmtree", lambda path, **kw: gone.append(path))
+    return gone
+
+
+def _answer_yes_to_all(world: World, home: Path):
+    world.answers = ["y", "y"]
+    return run_uninstall(home, world.build())
+
+
+def test_uninstall_never_deletes_the_user_home_or_its_ancestors(tmp_path, monkeypatch):
+    gone = _deletions(monkeypatch)
+    user = tmp_path / "users" / "someone"
+    user.mkdir(parents=True)
+    (user / "config.toml").write_text("")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: user))
+    for folder in (user, user.parent, tmp_path):
+        (folder / "config.toml").write_text("")
+        world = World(tmp_path)
+        _answer_yes_to_all(world, folder)
+        assert "will not delete" in world.output.lower()
+    assert gone == []
+
+
+def test_uninstall_never_deletes_a_drive_root(tmp_path, monkeypatch):
+    gone = _deletions(monkeypatch)
+    root = Path(tmp_path.anchor)
+    world = World(tmp_path)
+    _answer_yes_to_all(world, root)
+    assert gone == [] and "not delete" in world.output
+
+
+def test_uninstall_never_deletes_a_folder_with_unrelated_entries(tmp_path, monkeypatch):
+    gone = _deletions(monkeypatch)
+    folder = tmp_path / "work"
+    (folder / "runs").mkdir(parents=True)
+    (folder / "notes.txt").write_text("mine")
+    world = World(tmp_path)
+    _answer_yes_to_all(world, folder)
+    assert gone == [] and "not delete" in world.output
+    (folder / "notes.txt").unlink()  # runs alone, without config.toml or index.json, is not enough
+    world = World(tmp_path)
+    _answer_yes_to_all(world, folder)
+    assert gone == []
+
+
+def test_uninstall_deletes_a_folder_made_only_of_what_the_app_writes(tmp_path, monkeypatch):
+    gone = _deletions(monkeypatch)
+    folder = tmp_path / "data2"
+    for name in ("runs", "inbox", "browser-profile"):
+        (folder / name).mkdir(parents=True)
+    for name in ("config.toml", "index.json", "index.lock", "tray.lock", "profile.lock"):
+        (folder / name).write_text("")
+    world = World(tmp_path)
+    _answer_yes_to_all(world, folder)
+    assert gone == [folder]
+
+
+def test_the_shortcut_script_reads_utf8_and_the_output_is_decoded_as_utf8(tmp_path):
+    from investigate.firstrun import _CREATE_SCRIPT, _READ_SCRIPT
+
+    assert "OutputEncoding" in _READ_SCRIPT and "UTF8" in _READ_SCRIPT
+    assert "OutputEncoding" not in _CREATE_SCRIPT or "UTF8" in _CREATE_SCRIPT
+
+
+def test_a_real_shortcut_round_trips_a_non_ascii_path(tmp_path):
+    import shutil
+    import sys
+
+    import pytest
+
+    from investigate.firstrun import PowerShellShortcuts
+
+    if sys.platform != "win32" or shutil.which("powershell.exe") is None:
+        pytest.skip("needs Windows PowerShell")
+    link = tmp_path / "Üser" / "investigate.lnk"
+    shortcuts = PowerShellShortcuts()
+    target = str(tmp_path / "Müller" / "investigate-tray.exe")
+    shortcuts.create(link, target, r'--home "C:\Jörg"', "d")
+    assert shortcuts.read(link) == (target, r'--home "C:\Jörg"')
+
+
+def test_uninstall_says_it_is_waiting_for_running_runs(tmp_path, home):
+    world = World(tmp_path, answers=["y", ""])
+    world.tray_up = True
+    run_uninstall(home, world.build())
+    assert "waiting for running runs to stop" in world.output.lower()
+
+
+def test_uninstall_waits_long_enough_for_a_run_to_stop():
+    from investigate.firstrun import WAIT_FOR_QUIT_SECONDS
+
+    assert WAIT_FOR_QUIT_SECONDS >= 90
+
+
+def test_the_uninstall_shortcut_keeps_its_console_open_and_pause_waits_for_enter(tmp_path, home):
+    assert InstallIO().uninstall_command(home)[-2:] == ["uninstall", "--pause"]
+    world = World(tmp_path, answers=["n", ""])
+    run_uninstall(home, world.build(), pause=True)
+    assert world.asked[-1].startswith("Press Enter to close")
+    world = World(tmp_path, answers=["n"])
+    run_uninstall(home, world.build())
+    assert not any(a.startswith("Press Enter") for a in world.asked)
