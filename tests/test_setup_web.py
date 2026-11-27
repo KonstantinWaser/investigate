@@ -26,6 +26,7 @@ from investigate.setupweb import (
     MAX_CONTEXT_BYTES,
     SetupActions,
     SetupError,
+    SetupStatus,
     add_contexts,
     gather_status,
     set_browser,
@@ -499,9 +500,7 @@ def test_tray_setup_item_opens_the_setup_page(home):
 def test_background_login_refuses_while_the_profile_lock_is_held(home):
     from investigate.profile_lock import profile_lock
 
-    assert setupweb.login_running(home) is False
     with profile_lock(home):  # a Run, or the tray's own login window
-        assert setupweb.login_running(home) is True
         assert setupweb.background_login(home) is False
     assert setupweb.login_running(home) is False
 
@@ -651,3 +650,35 @@ def test_a_claude_login_action_bypasses_the_cache(client, fake):
     fake.io.status = (0, '{"loggedIn": true}')
     assert b"Not logged in" in client.get("/setup")[2]  # cached
     assert b"Logged in" in client.get("/setup?did=claude-login&t=1")[2]
+
+
+# review follow-up: reading the status never takes the real profile lock
+
+
+def test_login_running_and_the_status_never_take_the_profile_lock(home, monkeypatch):
+    from investigate import profile_lock
+
+    def boom(*a, **k):
+        raise AssertionError("the status check took the lock")
+
+    monkeypatch.setattr(profile_lock, "_try_lock", boom)
+    assert setupweb.login_running(home) is False
+    _, actions = _actions()
+    assert gather_status(home, actions).browser_login_running is False
+
+
+def test_status_reports_a_profile_that_a_browser_has_open(home, monkeypatch):
+    monkeypatch.setattr(setupweb.browser, "profile_in_use", lambda profile: True)
+    _, actions = _actions()
+    status = gather_status(home, actions)
+    assert status.browser_profile_busy and not status.browser_login_running
+
+
+def test_page_says_profile_in_use_when_a_run_holds_it_not_login_window(home):
+    from investigate.setuppage import setup_page
+
+    page = setup_page(SetupStatus(chrome=True, browser_profile_busy=True))
+    assert "browser profile is in use" in page and "login window is open" not in page
+    assert "/setup/browser-login" not in page
+    page = setup_page(SetupStatus(chrome=True, browser_login_running=True))
+    assert "login window is open" in page

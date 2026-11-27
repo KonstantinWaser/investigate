@@ -475,3 +475,57 @@ def test_uninstall_deletes_a_folder_the_setup_page_and_login_wrote_to(tmp_path, 
     world = World(tmp_path)
     _answer_yes_to_all(world, folder)
     assert gone == [folder]
+
+
+def test_the_default_uninstall_shortcut_parses_for_the_default_home():
+    from investigate.config import default_home
+    from investigate.firstrun import InstallIO
+
+    command = InstallIO().uninstall_command(default_home())
+    args = (
+        command[command.index("investigate.cli") + 1 :]
+        if "investigate.cli" in command
+        else command[1:]
+    )
+    assert "--home" not in args
+    parsed = cli._parser().parse_args(args)
+    assert parsed.command == "uninstall" and parsed.pause and parsed.home is None
+
+
+# stop-tray: what install.cmd runs before it replaces the program
+
+
+def test_stop_tray_is_a_quiet_no_op_when_no_tray_runs(tmp_path, home):
+    from investigate.firstrun import run_stop_tray
+
+    world = World(tmp_path)
+    assert run_stop_tray(home, world.build()) == 0
+    assert world.stopped == 0 and world.said == []
+
+
+def test_stop_tray_quits_a_running_tray(tmp_path, home):
+    from investigate.firstrun import run_stop_tray
+
+    world = World(tmp_path)
+    world.tray_up, world.url = True, "http://127.0.0.1:8765"
+    assert run_stop_tray(home, world.build()) == 0
+    assert world.stopped == 1 and not world.tray_up
+
+
+def test_stop_tray_says_plainly_when_the_tray_will_not_quit(tmp_path, home):
+    from investigate.firstrun import run_stop_tray
+
+    world = World(tmp_path)
+    world.tray_up, world.url, world.stop_works = True, "http://127.0.0.1:8765", False
+    # A code of its own: exit 1 is also what a broken install's crash gives, and install.cmd
+    # must not tell the user to quit a tray that is not there.
+    from investigate.firstrun import TRAY_STAYS
+
+    assert TRAY_STAYS not in (0, 1, 2, 3)  # 3: a C runtime abort, a Python that cannot start
+    assert run_stop_tray(home, world.build()) == TRAY_STAYS
+    assert "quit it from its menu" in world.output.lower()
+
+
+def test_stop_tray_subcommand_exists_and_takes_home():
+    parsed = cli._parser().parse_args(["stop-tray", "--home", "x"])
+    assert parsed.command == "stop-tray" and parsed.home == Path("x")

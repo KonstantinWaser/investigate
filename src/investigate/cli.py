@@ -11,7 +11,7 @@ from investigate import browser, history
 from investigate.attachments import AttachmentError
 from investigate.autostart import default_autostart, entry_suffix
 from investigate.config import ConfigError, Depth, data_home, load_config
-from investigate.firstrun import run_first_run, run_uninstall
+from investigate.firstrun import run_first_run, run_stop_tray, run_uninstall
 from investigate.hotkeys import default_hotkeys
 from investigate.inbox import (
     InboxConfig,
@@ -65,7 +65,8 @@ def _parser() -> argparse.ArgumentParser:
     uninstall.add_argument(
         "--pause", action="store_true", help="Wait for Enter at the end (the shortcut uses it)."
     )
-    for command in (first, uninstall):
+    stop = sub.add_parser("stop-tray", help="Quit a running tray (used before an update).")
+    for command in (first, uninstall, stop):
         command.add_argument("--home", type=Path, help="Data folder (default: the usual one).")
     sub.add_parser("login", help="Open the browser profile to log in to YouTube, Instagram, X.")
     tray = sub.add_parser("tray", help="Run the tray app: icon, quick capture and the server.")
@@ -189,11 +190,13 @@ def main(
         )
     if args.command == "setup":
         return run_setup(home)
-    if args.command in ("first-run", "uninstall"):
+    if args.command in ("first-run", "uninstall", "stop-tray"):
         if args.home:
             home = args.home.expanduser().resolve()
         if args.command == "first-run":
             return run_first_run(home)
+        if args.command == "stop-tray":
+            return run_stop_tray(home)
         return run_uninstall(home, assume_yes=args.yes, pause=args.pause and sys.stdin.isatty())
     if args.command == "login":
         return browser.login(home)

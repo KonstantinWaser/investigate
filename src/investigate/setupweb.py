@@ -97,12 +97,16 @@ def background_login(home: Path) -> bool:
 
 
 def login_running(home: Path) -> bool:
-    """A login window is open: one started here, or any holder of the profile lock (the tray's
-    own login, a Run)."""
+    """A login window started from this page is open. Read-only: it never takes the profile
+    lock, so loading the page cannot make a Run or an Inbox check lose the browser."""
     with _login_lock:
-        if _login_thread is not None and _login_thread.is_alive():
-            return True
-    return _profile_busy(home)
+        return _login_thread is not None and _login_thread.is_alive()
+
+
+def profile_open_elsewhere(home: Path) -> bool:
+    """A browser has the profile open that this page did not start (a Run, another login).
+    Read-only, like `login_running`."""
+    return not login_running(home) and browser.profile_in_use(browser.profile_dir(home))
 
 
 AGENT_STATUS_TTL_SECONDS = 30.0
@@ -149,6 +153,7 @@ class SetupStatus:
     chrome: bool = False
     browser_logged_in: bool = False
     browser_login_running: bool = False
+    browser_profile_busy: bool = False
     browser_flag: bool = False
     playlist: str = ""
     collection: str = ""
@@ -167,6 +172,7 @@ def gather_status(home: Path, actions: SetupActions, *, refresh: bool = False) -
         chrome=io.chrome_found(),
         browser_logged_in=browser.is_logged_in(home),
         browser_login_running=actions.browser_login_running(home),
+        browser_profile_busy=profile_open_elsewhere(home),
         ffmpeg=io.which("ffmpeg") is not None,
         winget=io.which("winget") is not None,
         whisper=io.has_module("faster_whisper"),

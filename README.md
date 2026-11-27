@@ -2,11 +2,13 @@
 
 A personal research desk. You paste text, links, files or images (or save an Instagram Collection or a YouTube playlist), an agent CLI researches or fact-checks it in depth, and you get a cited HTML Report that relates the findings to your own projects.
 
+**[Download install.cmd](https://github.com/KonstantinWaser/investigate/releases/latest/download/install.cmd)**, double-click it, and follow the setup page that opens. Windows 10 or 11, no command line, no administrator rights. Details in section 1.
+
 Runs happen on your machine through the Claude Code CLI. It has no server of its own. Traffic comes from the CLI and the agent (model calls, web search and fetch), the Inbox sources you configure (yt-dlp for YouTube, the browser profile for Instagram), and first-use downloads: the Playwright MCP package through npx and the Whisper model from Hugging Face. MIT licensed. The vocabulary (Item, Run, Report, Depth, Context, Inbox, Verdict) is in `GLOSSARY.md`, the agreed design in `docs/design.md`, what exists elsewhere in `docs/prior-art.md`, and how to add another agent CLI in `docs/runner.md`.
 
 ## Contents
 
-1. Requirements and install
+1. Install on Windows (no command line)
 2. First run: `investigate setup`
 3. Bring your own model
 4. Using it: command line, tray, quick capture, Reports, Follow-ups
@@ -17,21 +19,26 @@ Runs happen on your machine through the Claude Code CLI. It has no server of its
 9. Start at login and the hotkey
 10. macOS and Linux notes
 11. Terms of service risk
-12. Development
+12. Development, and install from a terminal
 
-## 1. Requirements and install
+## 1. Install on Windows (no command line)
 
-- Python 3.11 or newer and [uv](https://docs.astral.sh/uv/).
-- The [Claude Code CLI](https://docs.claude.com/en/docs/claude-code/setup) on your PATH (`claude`).
-- Optional: Google Chrome (browser login, Instagram Inbox), ffmpeg (transcription).
+1. Click **[Download install.cmd](https://github.com/KonstantinWaser/investigate/releases/latest/download/install.cmd)**. If the link does not start a download, use [the raw file](https://github.com/KonstantinWaser/investigate/raw/main/install.cmd): right-click it, choose Save link as, and make sure the name ends in `.cmd`, not `.txt`.
+2. Double-click the saved file. Windows SmartScreen may say "Windows protected your PC" because the file is not signed: click **More info**, then **Run anyway**. The file is short and readable, open it in Notepad first if you like.
+3. Wait a few minutes. The window shows each step in plain words:
+   1. It installs [uv](https://docs.astral.sh/uv/) if it is missing (the official installer).
+   2. It checks for the Claude Code CLI. If it is missing, it asks Y or N, and on Y runs the official Claude Code installer.
+   3. It installs investigate (with the tray, transcription and Instagram extras) from this repository.
+   4. It runs `investigate first-run`: Start menu shortcuts, start at login, the tray (no console window) and the setup page in your browser.
+4. On the setup page, log in to Claude Code, add Context files, and optionally log in the browser profile, set an Inbox, or install ffmpeg. Then paste something into quick capture (the tray icon, or `ctrl+alt+i`) and open your first Report.
 
-```
-git clone <this repository>
-cd investigate
-uv sync --extra tray --extra transcribe --extra instagram
-```
+Everything is installed for your Windows user, in your user profile, with no administrator rights. The installer does not install Git, Chrome or ffmpeg; the setup page links or installs what you choose. If a step fails, the window stays open with the message; running `install.cmd` again is safe.
 
-Each extra is optional: `tray` (icon, quick capture, toasts, hotkey), `transcribe` (faster-whisper, local speech to text), `instagram` (Playwright, for the Instagram Inbox). Plain `uv sync` is enough for the command line.
+**Update:** run `install.cmd` again. It quits a running tray first (if that fails it tells you to use the tray icon's Quit), reinstalls the newest version, starts the new tray, leaves your data folder and `config.toml` alone, and does not start a second tray.
+
+**Uninstall:** Start menu, **Uninstall investigate**. It quits the tray, removes the shortcuts and start at login, removes the program, and keeps your data folder (Reports, Context files, browser login) unless you answer yes to the second question. uv and Claude Code stay installed. If the shortcut no longer starts (an update that was cut off, say), run `install.cmd` again to repair it, or remove the program by hand with `uv tool uninstall investigate`.
+
+The installed copy comes from the `main` branch of this repository as a zip file (so Git is not needed). Terminal install and development are in section 12.
 
 ## 2. First run: `investigate setup`
 
@@ -189,10 +196,30 @@ The author uses and tests Windows 11. The macOS and Linux paths are written to t
 
 Automated access to Instagram and X is against their terms of service. The Instagram Inbox and logged-in browser search on those sites do exactly that, and other sites may have similar terms. Platforms may rate limit, challenge or suspend an account that they see automating. You use these features at your own risk, with your own accounts, and you accept that risk: the authors give no assurance that an account will not be restricted. Consider a secondary account, and leave `[inbox.instagram]` and `browser = false` unset if you are unwilling to take it. Text, URL and YouTube-playlist Runs do not need any logged-in access.
 
-## 12. Development
+## 12. Development, and install from a terminal
+
+### Install from a terminal
+
+- Python 3.11 or newer and [uv](https://docs.astral.sh/uv/).
+- The [Claude Code CLI](https://docs.claude.com/en/docs/claude-code/setup) on your PATH (`claude`).
+- Optional: Google Chrome (browser login, Instagram Inbox), ffmpeg (transcription).
+
+```
+git clone <this repository>
+cd investigate
+uv sync --extra tray --extra transcribe --extra instagram
+```
+
+Each extra is optional: `tray` (icon, quick capture, toasts, hotkey), `transcribe` (faster-whisper, local speech to text), `instagram` (Playwright, for the Instagram Inbox). Plain `uv sync` is enough for the command line. As a tool without a clone: `uv tool install "investigate[tray] @ https://github.com/KonstantinWaser/investigate/archive/refs/heads/main.zip"`, then `investigate first-run`. The commands in this README are written `uv run investigate ...` for a clone.
+
+### Publishing install.cmd
+
+The download link points at the latest release's `install.cmd` asset, which GitHub serves as a download (the raw file is shown as text). A maintainer publishes it with `gh release create <tag> install.cmd`, and again for a changed script (`gh release upload <tag> install.cmd --clobber`). The script installs the `main` branch, so a release is only needed when `install.cmd` itself changes.
+
+### Tests
 
 ```
 uv run ruff check . && uv run ruff format --check . && uv run pytest
 ```
 
-Tests use a fake runner and an `INVESTIGATE_HOME` in a temp folder: no network, no Claude login. A test scans every tracked file for personal data (user-home paths with a real-looking name, email addresses). To also check words only you know (your name, employer), put them one per line in a file outside the repo and point `INVESTIGATE_DENYLIST` at it before running the tests. `AGENTS.md` has the layout of the code, and `docs/runner.md` the interface a new agent CLI adapter implements.
+Tests use a fake runner and an `INVESTIGATE_HOME` in a temp folder: no network, no Claude login. A test scans every tracked file for personal data (user-home paths with a real-looking name, email addresses). To also check words only you know (your name, employer), put them one per line in a file outside the repo and point `INVESTIGATE_DENYLIST` at it before running the tests. `install.cmd` is read by `tests/test_install_cmd.py`, which fails when its extras, entry points, repository URL or subcommand drift from the package. `AGENTS.md` has the layout of the code, and `docs/runner.md` the interface a new agent CLI adapter implements.

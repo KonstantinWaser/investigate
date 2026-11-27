@@ -33,6 +33,7 @@ import tomlkit
 
 from investigate import browser
 from investigate.config import Config, ConfigError, config_path, load_config, validate_raw
+from investigate.runner import find_claude
 from investigate.settings import _write_atomically
 
 STATUS_TIMEOUT_SECONDS = 20
@@ -80,11 +81,17 @@ def _has_module(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
+def _which(name: str) -> str | None:
+    if name == "claude":
+        return find_claude(shutil.which)
+    return shutil.which(name)
+
+
 @dataclass(frozen=True)
 class SetupIO:
     ask: Callable[[str], str] = input
     say: Callable[[str], None] = print
-    which: Callable[[str], str | None] = shutil.which
+    which: Callable[[str], str | None] = _which
     run: Callable[[list[str]], tuple[int, str]] = _run
     has_module: Callable[[str], bool] = _has_module
     login: Callable[[Path], int] = field(default=browser.login)

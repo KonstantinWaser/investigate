@@ -450,6 +450,26 @@ def _delete_data_folder(io: InstallIO, home: Path) -> None:
         io.say(f"Deleted {home}")
 
 
+TRAY_STAYS = 75
+"""`stop-tray`'s exit code for a tray that will not quit. Its own number, because 1 is what any
+crash gives (a half-replaced install, say), 2 is argparse's code for an older install without
+`stop-tray` and 3 is a C runtime abort (a Python that cannot start); `install.cmd` goes on to the
+install for those."""
+
+
+def run_stop_tray(home: Path, io: InstallIO | None = None) -> int:
+    """Quit a running tray so its program files can be replaced (`install.cmd` runs this before
+    an update). Silent and 0 when no tray runs; `TRAY_STAYS`, with what to do, when it stays."""
+    io = io or InstallIO()
+    if not io.tray_running(home):
+        return 0
+    io.say("Quitting the running tray so it can be updated...")
+    if io.stop_tray(home):
+        return 0
+    io.say("The tray did not quit. Quit it from its menu (or Task Manager) and run this again.")
+    return TRAY_STAYS
+
+
 def run_uninstall(
     home: Path, io: InstallIO | None = None, *, assume_yes: bool = False, pause: bool = False
 ) -> int:

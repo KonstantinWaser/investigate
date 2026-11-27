@@ -84,17 +84,37 @@ def _find_chrome() -> str | None:
     return str(mac) if mac.exists() else None
 
 
+def _windows_file_is_held(path: Path) -> bool:
+    """True when another process holds `path` open without sharing delete, which is how Chrome
+    holds its `lockfile`. Asks for delete access but never deletes: a probe that unlinked a
+    stale file could race a Chrome that is just starting."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    delete, share_all, open_existing = 0x10000, 0x7, 3
+    handle = kernel.CreateFileW(str(path), delete, share_all, None, open_existing, 0, None)
+    if handle in (None, wintypes.HANDLE(-1).value):
+        return ctypes.get_last_error() in (5, 32)  # access denied, sharing violation
+    kernel.CloseHandle(handle)
+    return False  # opened, or the file is gone: nobody holds it
+
+
 def profile_in_use(profile: Path) -> bool:
-    """True when a Chrome still has the profile open (its own lock marker is live)."""
+    """True when a Chrome still has the profile open (its own lock marker is live). Read-only."""
     if sys.platform == "win32":
-        lockfile = profile / "lockfile"
-        if not lockfile.exists():
-            return False
-        try:  # Chrome holds it open without delete sharing; a stale one can be removed
-            lockfile.unlink()
-        except OSError:
-            return True
-        return False
+        return _windows_file_is_held(profile / "lockfile")
     link = profile / "SingletonLock"
     if not link.is_symlink():
         return False

@@ -314,3 +314,32 @@ def test_allowlist_keeps_attachments_rule_with_the_browser(tmp_path):
     cmd = build_command(["claude"], _request(tmp_path, browser_profile=tmp_path))
     assert any(a.startswith("Read(") and a.endswith("/attachments/**)") for a in cmd)
     assert "mcp__playwright__browser_navigate" in cmd
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the lockfile marker is Windows only")
+def test_profile_in_use_never_deletes_chromes_lockfile(home):
+    profile = browser.profile_dir(home)
+    profile.mkdir(parents=True)
+    lockfile = profile / "lockfile"
+    lockfile.write_bytes(b"")  # left behind, nobody holds it
+    assert not browser.profile_in_use(profile)
+    assert lockfile.exists()  # a probe must not race a Chrome that is about to open it
+    handle = open(lockfile, "wb")  # noqa: SIM115
+    try:
+        assert browser.profile_in_use(profile)
+        assert lockfile.exists()
+    finally:
+        handle.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the lockfile marker is Windows only")
+def test_profile_in_use_treats_a_vanishing_lockfile_as_not_in_use(home, monkeypatch):
+    profile = browser.profile_dir(home)
+    profile.mkdir(parents=True)
+    (profile / "lockfile").write_bytes(b"")
+    real_exists = type(profile).exists
+    monkeypatch.setattr(
+        type(profile), "exists", lambda self: True if self.name == "lockfile" else real_exists(self)
+    )
+    (profile / "lockfile").unlink()  # Chrome exits between the check and the probe
+    assert not browser.profile_in_use(profile)

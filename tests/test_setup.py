@@ -369,3 +369,12 @@ def test_agent_status_reads_logged_in_and_out_and_missing():
     assert agent_status(out).logged_in is False
     missing = agent_status(FakeIO(claude=None).build())
     assert not missing.installed and missing.logged_in is None
+
+
+def test_default_which_finds_claude_in_the_native_installer_folder(monkeypatch):
+    from investigate import setup
+
+    monkeypatch.setattr(setup.shutil, "which", lambda name: None)
+    monkeypatch.setattr(setup, "find_claude", lambda which: "C:/tools/claude.exe")
+    assert setup.SetupIO().which("claude") == "C:/tools/claude.exe"
+    assert setup.SetupIO().which("ffmpeg") is None
