@@ -517,7 +517,12 @@ def test_stop_tray_says_plainly_when_the_tray_will_not_quit(tmp_path, home):
 
     world = World(tmp_path)
     world.tray_up, world.url, world.stop_works = True, "http://127.0.0.1:8765", False
-    assert run_stop_tray(home, world.build()) == 1
+    # A code of its own: exit 1 is also what a broken install's crash gives, and install.cmd
+    # must not tell the user to quit a tray that is not there.
+    from investigate.firstrun import TRAY_STAYS
+
+    assert TRAY_STAYS not in (0, 1, 2)
+    assert run_stop_tray(home, world.build()) == TRAY_STAYS
     assert "quit it from its menu" in world.output.lower()
 
 

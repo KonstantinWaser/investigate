@@ -99,12 +99,20 @@ def test_it_stops_a_running_tray_before_it_replaces_the_program():
     assert r'if not exist "%TOOLBIN%\investigate.exe"' in guard  # a first install has no program
     argv = line.split(".exe", 1)[1].replace('"', "").split()
     assert cli._parser().parse_args(argv).command == "stop-tray"
-    # stop-tray returns 0 or 1. An older install has no stop-tray (argparse exits 2) and a broken
-    # one fails to start; both go on to the install instead of asking to quit the tray forever.
-    older, stays = TEXT.splitlines()[stop + 1 : stop + 3]
-    assert "errorlevel 2" in older and "goto install_tool" in older
-    assert "errorlevel 1" in stays and "goto tray_stays" in stays
-    assert "choose quit" in TEXT.lower()
+    # Only stop-tray's own "tray stays" code loops back to the user. An older install has no
+    # stop-tray (argparse exits 2) and a broken one crashes (exit 1); both ask the user to quit
+    # the tray icon if it shows and then go on to the install.
+    from investigate.firstrun import TRAY_STAYS
+
+    above, stays, other = TEXT.splitlines()[stop + 1 : stop + 4]
+    assert above == f"if errorlevel {TRAY_STAYS + 1} goto tray_unknown"
+    assert stays == f"if errorlevel {TRAY_STAYS} goto tray_stays"
+    assert other == "if errorlevel 1 goto tray_unknown"
+    assert TEXT.splitlines()[stop + 4] == ":install_tool"
+    unknown = TEXT[re.search(r"^:tray_unknown\b", TEXT, re.M).start() :]
+    unknown = unknown[: unknown.index("goto install_tool")]
+    assert "choose quit" in unknown.lower() and "pause" in unknown
+    assert "choose quit" in TEXT[re.search(r"^:tray_stays\b", TEXT, re.M).start() :].lower()
 
 
 def test_the_tool_folder_is_known_before_the_tray_is_stopped():

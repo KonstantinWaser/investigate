@@ -36,7 +36,7 @@ Everything is installed for your Windows user, in your user profile, with no adm
 
 **Update:** run `install.cmd` again. It quits a running tray first (if that fails it tells you to use the tray icon's Quit), reinstalls the newest version, starts the new tray, leaves your data folder and `config.toml` alone, and does not start a second tray.
 
-**Uninstall:** Start menu, **Uninstall investigate**. It quits the tray, removes the shortcuts and start at login, removes the program, and keeps your data folder (Reports, Context files, browser login) unless you answer yes to the second question. uv and Claude Code stay installed.
+**Uninstall:** Start menu, **Uninstall investigate**. It quits the tray, removes the shortcuts and start at login, removes the program, and keeps your data folder (Reports, Context files, browser login) unless you answer yes to the second question. uv and Claude Code stay installed. If the shortcut no longer starts (an update that was cut off, say), run `install.cmd` again to repair it, or remove the program by hand with `uv tool uninstall investigate`.
 
 The installed copy comes from the `main` branch of this repository as a zip file (so Git is not needed). Terminal install and development are in section 12.
 

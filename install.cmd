@@ -44,8 +44,9 @@ if not defined TOOLBIN goto fail
 if not exist "%TOOLBIN%\investigate.exe" goto install_tool
 echo Updating. Quitting investigate first if it is running.
 "%TOOLBIN%\investigate.exe" stop-tray
-if errorlevel 2 goto install_tool
-if errorlevel 1 goto tray_stays
+if errorlevel 4 goto tray_unknown
+if errorlevel 3 goto tray_stays
+if errorlevel 1 goto tray_unknown
 :install_tool
 uv tool install --force --refresh "investigate[tray,transcribe,instagram] @ https://github.com/KonstantinWaser/investigate/archive/refs/heads/main.zip"
 if errorlevel 1 goto fail
@@ -61,6 +62,13 @@ echo.
 echo Done. The setup page is open in your browser. You can close this window.
 exit /b 0
 
+:tray_unknown
+echo.
+echo The installed version could not quit investigate by itself.
+echo If its tray icon is showing, right-click it and choose Quit, then press a key.
+pause
+goto install_tool
+
 :tray_stays
 echo.
 echo investigate is still running and cannot be updated while it runs.
@@ -70,5 +78,6 @@ goto fail
 :fail
 echo.
 echo Something went wrong, see the messages above. Running this file again is safe.
+echo If investigate is running, quit it from its tray icon first.
 pause
 exit /b 1
