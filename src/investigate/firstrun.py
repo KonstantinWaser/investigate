@@ -450,10 +450,11 @@ def _delete_data_folder(io: InstallIO, home: Path) -> None:
         io.say(f"Deleted {home}")
 
 
-TRAY_STAYS = 3
+TRAY_STAYS = 75
 """`stop-tray`'s exit code for a tray that will not quit. Its own number, because 1 is what any
-crash gives (a half-replaced install, say) and 2 is argparse's code for an older install without
-`stop-tray`; `install.cmd` goes on to the install for those."""
+crash gives (a half-replaced install, say), 2 is argparse's code for an older install without
+`stop-tray` and 3 is a C runtime abort (a Python that cannot start); `install.cmd` goes on to the
+install for those."""
 
 
 def run_stop_tray(home: Path, io: InstallIO | None = None) -> int:
